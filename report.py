@@ -86,11 +86,46 @@ def daily_embed(state):
 
 
 def alert_embed(kind, title, lines):
-    colours = {"new_ath": GREEN, "new_low": RED, "window": AMBER, "resolved": BLUE}
+    colours = {"new_ath": GREEN, "new_low": RED, "window": AMBER,
+               "resolved": BLUE, "in_band": 0x9B59B6}
     return {
         "title": title,
         "description": "\n".join(lines),
         "color": colours.get(kind, BLUE),
+    }
+
+
+def window_embed(state):
+    """The ATL-window view. Foregrounds the one thing that is knowable in real
+    time - whether a new leg low printed inside the tolerance band - and is
+    explicit that a confirmed bottom is years away."""
+    leg = state["leg"]
+    prov = state["provisional"]
+    band_lo = leg["target_date"] - __import__("datetime").timedelta(days=state["tolerance"])
+    band_hi = leg["target_date"] + __import__("datetime").timedelta(days=state["tolerance"])
+    in_band = prov and band_lo <= prov["date"] <= band_hi
+
+    lines = [
+        "Band: **%s -> %s** (+/-%dd around %s)" % (
+            band_lo.isoformat(), band_hi.isoformat(),
+            state["tolerance"], leg["target_date"].isoformat()),
+        "T-minus: **%d days**" % leg["remaining"],
+        "",
+        "Leg low so far: **%s** on **%s**, stood **%d days**" % (
+            _money(prov["price"]), prov["date"].isoformat(), prov["stood_days"]),
+        "Confidence it is THE low: **%s**" % prov["confidence"],
+        "New leg lows this cycle: **%d**" % state["new_low_count"],
+        "",
+        ("**A new leg low HAS printed inside the band.**" if in_band
+         else "No leg low inside the band yet."),
+    ]
+    return {
+        "title": "ATL WINDOW - %s +/-%dd" % (leg["target_date"].isoformat(), state["tolerance"]),
+        "description": "\n".join(lines),
+        "color": 0x9B59B6 if in_band else AMBER,
+        "footer": {"text": "no reliable real-time bottom detector exists in this data "
+                           "(n=3 cycles, all discriminators overlap) - a confirmed ATL "
+                           "needs the next confirmed ATH, ~2029."},
     }
 
 
@@ -101,8 +136,9 @@ def render_text(embeds):
         out.append("=" * 62)
         out.append(e["title"])
         if e.get("description"):
-            out.append(e["description"])
-        out.append("-" * 62)
+            out.append(e["description"].replace("**", ""))
+        if e.get("fields"):
+            out.append("-" * 62)
         for f in e.get("fields", []):
             out.append("%s:" % f["name"])
             out.append("   " + f["value"].replace("`", "").replace("**", ""))

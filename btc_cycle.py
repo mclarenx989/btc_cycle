@@ -79,10 +79,18 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# How far ahead of a projected pivot the dedicated window view switches on.
+WINDOW_LEAD_DAYS = 90
+
+
 def connect():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(scores)")}
+    if "provisional" not in cols:
+        conn.execute("ALTER TABLE scores ADD COLUMN provisional INTEGER DEFAULT 0")
+        conn.commit()
     return conn
 
 
@@ -233,8 +241,13 @@ def build_state(conn, series, ps, today):
     else:
         agreement = "n/a"
 
+    prov = pv.provisional_atl(series, ps[-1]["date"], today) if ps else None
+    new_lows = pv.new_lows_since(series, ps[-1]["date"]) if ps else []
+
     return {"leg": leg, "price": price, "pivots": ps, "running_low": low,
-            "scored": scored, "hits": hits, "agreement": agreement, "today": today}
+            "scored": scored, "hits": hits, "agreement": agreement, "today": today,
+            "provisional": prov, "new_low_count": len(new_lows),
+            "new_lows": new_lows, "tolerance": sch.TOLERANCE_DAYS}
 
 
 def resolve_projections(conn, ps, today):
@@ -263,6 +276,31 @@ def resolve_projections(conn, ps, today):
                                   if g["within_tolerance"] else "MISS")]))
     conn.commit()
     return alerts
+
+
+def window(conn):
+    """The ATL-window view on demand, plus the historical context that says
+    how much a standing low is actually worth."""
+    today = datetime.now(timezone.utc).date()
+    series = load_candles(conn)
+    ps = load_pivots(conn)
+    if not series or not ps:
+        raise SystemExit("No data. Run --backfill first.")
+    state = build_state(conn, series, ps, today)
+    print(report.render_text([report.window_embed(state)]))
+
+    print("\nHow long lows have stood before breaking, by completed down leg:")
+    for a, b in zip(ps, ps[1:]):
+        if not (a["kind"] == "ath" and b["kind"] == "atl"):
+            continue
+        leg_rows = [c for c in series if a["date"] < c["date"] <= b["date"]]
+        marks = pv.new_lows_since(leg_rows, a["date"] - timedelta(days=1))
+        stands = [(marks[i + 1]["date"] - marks[i]["date"]).days
+                  for i in range(len(marks) - 1)]
+        print("   %s -> %s: %2d new lows, longest false stand %3dd"
+              % (a["date"], b["date"], len(marks), max(stands) if stands else 0))
+    print("\n   worst on record: a low held %dd and still broke (2014-04-11)."
+          % pv.FALSE_LOW_MAX_STAND)
 
 
 def daily(conn, dry_run):
@@ -294,13 +332,31 @@ def daily(conn, dry_run):
 
     state = build_state(conn, series, ps, today)
     leg = state["leg"]
-    if 0 <= leg["remaining"] <= 7:
+
+    # A new leg low is the one bottom-related event that is knowable the day it
+    # happens. Inside the tolerance band it is the whole ballgame, so it gets
+    # its own loud alert rather than a line in the daily embed.
+    band_lo = leg["target_date"] - timedelta(days=sch.TOLERANCE_DAYS)
+    band_hi = leg["target_date"] + timedelta(days=sch.TOLERANCE_DAYS)
+    for c in state["new_lows"]:
+        if c["date"] != today:
+            continue
+        inside = band_lo <= c["date"] <= band_hi
         embeds.append(report.alert_embed(
-            "window", "Projection window opening - %s %s"
-            % (leg["to_kind"].upper(), leg["target_date"].isoformat()),
-            ["**%d days** out. Tolerance band +/-%d days."
-             % (leg["remaining"], sch.TOLERANCE_DAYS),
-             "A confirmed pivot inside the band scores a hit."]))
+            "in_band" if inside else "new_low",
+            "%sNew leg low - %s" % ("IN BAND: " if inside else "", c["date"]),
+            ["Low: **%s**  (%.1f%% off the %s ATH)"
+             % (report._money(c["low"]),
+                (c["low"] / leg["from"]["price"] - 1.0) * 100.0,
+                leg["from"]["date"].isoformat()),
+             "Leg low #%d. %s"
+             % (state["new_low_count"],
+                ("**Inside the +/-%dd band around %s.**"
+                 % (sch.TOLERANCE_DAYS, leg["target_date"].isoformat())) if inside
+                else "T-minus %d days to the projected low." % leg["remaining"])]))
+
+    if leg["to_kind"] == "atl" and leg["remaining"] <= WINDOW_LEAD_DAYS and state["provisional"]:
+        embeds.append(report.window_embed(state))
 
     embeds.append(report.daily_embed(state))
 
@@ -327,12 +383,16 @@ def main():
     ap.add_argument("--backfill", action="store_true")
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--window", action="store_true",
+                    help="ATL-window view only, no post")
     args = ap.parse_args()
     conn = connect()
     if args.backfill:
         backfill(conn)
     elif args.verify:
         verify(conn)
+    elif args.window:
+        window(conn)
     else:
         daily(conn, args.dry_run)
 

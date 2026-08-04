@@ -87,6 +87,41 @@ class TestConfirmDaysCalibration(unittest.TestCase):
         self.assertLessEqual(pv.CONFIRM_DAYS, 302)
 
 
+class TestProvisionalLow(unittest.TestCase):
+    """A confirmed ATL needs the NEXT confirmed ATH, which is years out. The
+    only real-time signal is a new leg low, so it must never be promoted to a
+    confirmed pivot, and its confidence must stay calibrated to the observed
+    false-positive distribution."""
+
+    def setUp(self):
+        s = ramp(date(2025, 10, 7), 100, 90, 80)
+        s += [(date(2026, 1, 15), 70, 60)]
+        s += ramp(date(2026, 1, 16), 200, 75, 65)
+        self.series = series(s)
+
+    def test_new_lows_are_each_reported(self):
+        marks = pv.new_lows_since(self.series, date(2025, 10, 6))
+        self.assertEqual(marks[0]["date"], date(2025, 10, 7))
+        self.assertEqual(marks[-1]["date"], date(2026, 1, 15))
+        self.assertEqual(marks[-1]["low"], 60)
+
+    def test_provisional_never_claims_confirmation(self):
+        p = pv.provisional_atl(self.series, date(2025, 10, 6), date(2026, 3, 1))
+        self.assertTrue(p["provisional"])
+        self.assertEqual(p["date"], date(2026, 1, 15))
+        self.assertEqual(p["stood_days"], 45)
+
+    def test_confidence_is_calibrated_to_the_176d_false_low(self):
+        self.assertIn("weak", pv.confidence(34))
+        self.assertIn("tentative", pv.confidence(90))
+        self.assertIn("likely", pv.confidence(pv.FALSE_LOW_TYPICAL_STAND))
+        self.assertIn("strong", pv.confidence(pv.FALSE_LOW_MAX_STAND + 1))
+
+    def test_a_low_standing_176d_is_not_yet_strong(self):
+        """The 2014-04-11 low held exactly this long and still broke."""
+        self.assertNotIn("strong", pv.confidence(pv.FALSE_LOW_MAX_STAND))
+
+
 class TestSchedule(unittest.TestCase):
     def test_oracle_chain_reproduces_the_famous_date(self):
         """From the 2021-11-08 daily-close anchor: +364 -> a low that never

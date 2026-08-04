@@ -82,6 +82,59 @@ def running_low_since(series, since_date):
     return min(window, key=lambda c: c["low"])
 
 
+def new_lows_since(series, since_date):
+    """Every candle that set a new leg low, in order. The real-time signal:
+    each one is knowable the day it happens, unlike a confirmed ATL."""
+    best = float("inf")
+    out = []
+    for c in series:
+        if c["date"] <= since_date:
+            continue
+        if c["low"] < best:
+            best = c["low"]
+            out.append(c)
+    return out
+
+
+# How long a low can stand and STILL be broken. Measured across the three
+# completed down legs: the 2014-04-11 low held 176 days before giving way.
+# Two other false lows held 138 and 143. This is why the tracker does not
+# claim to call bottoms - see confidence() below.
+FALSE_LOW_MAX_STAND = 176
+FALSE_LOW_TYPICAL_STAND = 138
+
+
+def confidence(stood_days):
+    """Calibrated confidence that a standing low is THE cycle low.
+
+    Deliberately not a detector. Recovery magnitude was tested as a
+    discriminator and rejected: the 2013-12-18 false low recovered 160% while
+    the real 2022-11-21 bottom recovered 18.7% over the same horizon. With
+    n=3 completed cycles nothing separates cleanly, so the tracker reports how
+    long a low has stood against the historical false-positive distribution
+    and lets the reader assign their own odds.
+    """
+    if stood_days > FALSE_LOW_MAX_STAND:
+        return "strong (outlasted every false low on record)"
+    if stood_days >= FALSE_LOW_TYPICAL_STAND:
+        return "likely (outlasted all but the 176d false low of 2014)"
+    if stood_days >= 90:
+        return "tentative (false lows have held this long 4x)"
+    return "weak (well inside the range false lows routinely hold)"
+
+
+def provisional_atl(series, since_date, today):
+    """The current leg's low, with how long it has stood and how much that is
+    worth. Never promoted to a confirmed pivot - only the next confirmed ATH
+    can do that, which is years out."""
+    low = running_low_since(series, since_date)
+    if low is None:
+        return None
+    stood = (today - low["date"]).days
+    return {"date": low["date"], "price": low["low"], "stood_days": stood,
+            "confidence": confidence(stood), "provisional": True}
+
+
 def detect(series, confirm_days=CONFIRM_DAYS):
     """Full pivot table, oldest first. Each entry: date, kind, price."""
     aths = confirmed_aths(series, confirm_days)
