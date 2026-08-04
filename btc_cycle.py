@@ -82,6 +82,17 @@ def now_iso():
 # How far ahead of a projected pivot the dedicated window view switches on.
 WINDOW_LEAD_DAYS = 90
 
+# A --dry-run must not mutate the ledger. Grading is a one-shot event - once a
+# projection is scored it never alerts again - so a preview that quietly
+# committed its grades would burn the real notification.
+DRY_RUN = False
+
+
+def commit(conn):
+    if DRY_RUN:
+        return
+    conn.commit()
+
 
 def connect():
     conn = sqlite3.connect(DB_PATH)
@@ -101,7 +112,7 @@ def save_candles(conn, rows):
         "high=excluded.high, low=excluded.low, close=excluded.close",
         [(c["date"].isoformat(), c["open"], c["high"], c["low"], c["close"],
           c["source"], now_iso()) for c in rows])
-    conn.commit()
+    commit(conn)
 
 
 def load_candles(conn):
@@ -119,7 +130,7 @@ def save_pivots(conn, found):
         "INSERT OR IGNORE INTO pivots (date,kind,price,source,detected_at) VALUES (?,?,?,?,?)",
         [(p["date"].isoformat(), p["kind"], p["price"], p["source"], now_iso())
          for p in found])
-    conn.commit()
+    commit(conn)
     return fresh
 
 
@@ -136,7 +147,7 @@ def save_projections(conn, rows):
         "(schedule,kind,projected_date,tolerance_days,basis,created_at) VALUES (?,?,?,?,?,?)",
         [(r["schedule"], r["kind"], r["date"].isoformat(), sch.TOLERANCE_DAYS,
           r["basis"], now_iso()) for r in rows])
-    conn.commit()
+    commit(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -263,10 +274,16 @@ def resolve_projections(conn, ps, today):
         g = sc.grade(proj, ps, r["tolerance_days"])
         if g is None:
             continue
+        # Name the columns. A positional VALUES list silently breaks the first
+        # time a migration adds one - and the next projection to resolve is the
+        # 2026-10-05 ATL, so that break would have landed in the window this
+        # tool exists to watch.
         conn.execute(
-            "INSERT OR REPLACE INTO scores VALUES (?,?,?,?,?)",
+            "INSERT OR REPLACE INTO scores "
+            "(projection_id, realized_date, days_off, within_tolerance, scored_at, provisional) "
+            "VALUES (?,?,?,?,?,?)",
             (r["id"], g["realized_date"].isoformat(), g["days_off"],
-             1 if g["within_tolerance"] else 0, now_iso()))
+             1 if g["within_tolerance"] else 0, now_iso(), 0))
         alerts.append(report.alert_embed(
             "resolved",
             "Projection resolved - %s %s (%s)" % (r["kind"].upper(), r["projected_date"], r["schedule"]),
@@ -274,7 +291,7 @@ def resolve_projections(conn, ps, today):
              "Off by: **%+d days**" % g["days_off"],
              "Verdict: **%s**" % ("WITHIN +/-%dd" % r["tolerance_days"]
                                   if g["within_tolerance"] else "MISS")]))
-    conn.commit()
+    commit(conn)
     return alerts
 
 
@@ -364,11 +381,12 @@ def daily(conn, dry_run):
         "INSERT OR REPLACE INTO snapshots VALUES (?,?,?,?,?,?)",
         (today.isoformat(), state["price"], leg["to_kind"], leg["elapsed"],
          leg["remaining"], (state["price"] / leg["from"]["price"] - 1.0) * 100.0))
-    conn.commit()
+    commit(conn)
 
     if dry_run:
+        conn.rollback()
         print(report.render_text(embeds))
-        print("\n[dry run - nothing posted]")
+        print("\n[dry run - nothing posted, no rows committed]")
         return
     hook = os.environ.get("DISCORD_WEBHOOK_URL")
     if not hook:
@@ -386,6 +404,8 @@ def main():
     ap.add_argument("--window", action="store_true",
                     help="ATL-window view only, no post")
     args = ap.parse_args()
+    global DRY_RUN
+    DRY_RUN = args.dry_run
     conn = connect()
     if args.backfill:
         backfill(conn)
