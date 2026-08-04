@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.btccycle.snapshot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/mclarenx989/btc_cycle/ops/run_btc_cycle.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/mclarenx989/btc_cycle</string>
+
+    <!-- 09:10 local, ten minutes after the Kalshi job, so the two Discord
+         posts do not land in the same second and the logs stay readable if
+         both fail on the same network blip. No jitter: this hits public
+         exchange APIs where a predictable daily timestamp makes the price
+         series cleaner, same reasoning as the Kalshi plist. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>10</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/mclarenx989/btc_cycle/logs/launchd.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/mclarenx989/btc_cycle/logs/launchd.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
