@@ -115,12 +115,12 @@ def confidence(stood_days):
     and lets the reader assign their own odds.
     """
     if stood_days > FALSE_LOW_MAX_STAND:
-        return "strong (outlasted every false low on record)"
+        return "\U0001f7e2  **Strong**  ·  outlasted every false low on record (>%dd)" % FALSE_LOW_MAX_STAND
     if stood_days >= FALSE_LOW_TYPICAL_STAND:
-        return "likely (outlasted all but the 176d false low of 2014)"
+        return "\U0001f7e1  **Likely**  ·  beaten only by the %dd false low of 2014" % FALSE_LOW_MAX_STAND
     if stood_days >= 90:
-        return "tentative (false lows have held this long 4x)"
-    return "weak (well inside the range false lows routinely hold)"
+        return "\U0001f7e0  **Tentative**  ·  false lows have held this long 4×"
+    return "\U0001f534  **Weak**  ·  inside the range false lows routinely hold"
 
 
 def provisional_atl(series, since_date, today):

@@ -1,24 +1,34 @@
 #!/usr/bin/env python3
 """Discord embeds, plus a plain-text rendering of the same content so a
 --dry-run shows exactly what would be posted.
+
+Presentation only. Every value shown here is computed upstream in pivots /
+schedule / score - this module never derives a number of its own.
 """
 
 import json
 import urllib.error
 import urllib.request
+from datetime import timedelta
 
-GREEN, AMBER, RED, BLUE = 0x2ECC71, 0xF1C40F, 0xE74C3C, 0x3498DB
-BAR_WIDTH = 24
+GREEN, AMBER, RED, BLUE, VIOLET = 0x2ECC71, 0xF1C40F, 0xE74C3C, 0x3498DB, 0x9B59B6
+BAR_WIDTH = 20
+
+FILLED, EMPTY = "█", "░"   # full block / light shade
 
 
 def _money(v):
     return "$" + format(int(round(v)), ",")
 
 
+def _pct(v):
+    return "%+.1f%%" % v
+
+
 def bar(pct, width=BAR_WIDTH):
     pct = max(0.0, min(100.0, pct))
     filled = int(round(pct / 100.0 * width))
-    return "`" + "#" * filled + "-" * (width - filled) + "`"
+    return "`" + FILLED * filled + EMPTY * (width - filled) + "`"
 
 
 def drawdown_history(pivots):
@@ -34,6 +44,15 @@ def drawdown_history(pivots):
     return out
 
 
+def _band(leg, tolerance):
+    return (leg["target_date"] - timedelta(days=tolerance),
+            leg["target_date"] + timedelta(days=tolerance))
+
+
+# ---------------------------------------------------------------------------
+# embeds
+# ---------------------------------------------------------------------------
+
 def daily_embed(state):
     leg = state["leg"]
     ath = leg["from"]
@@ -41,111 +60,136 @@ def daily_embed(state):
     dd = (price / ath["price"] - 1.0) * 100.0
 
     hist = drawdown_history(state["pivots"])
-    hist_txt = " / ".join("%.0f%%" % h["pct"] for h in hist) or "n/a"
+    if hist:
+        hist_txt = "\n".join(
+            "`%s → %s`  **%.0f%%**  in %dd"
+            % (h["ath"]["date"].year, str(h["atl"]["date"].year)[2:], h["pct"], h["days"])
+            for h in hist)
+    else:
+        hist_txt = "—"
 
     low = state.get("running_low")
     if low:
-        low_txt = "%s on %s (%.1f%% off ATH)" % (
+        low_txt = "**%s**  ·  %s  ·  %s off ATH" % (
             _money(low["low"]), low["date"].isoformat(),
-            (low["low"] / ath["price"] - 1.0) * 100.0)
+            _pct((low["low"] / ath["price"] - 1.0) * 100.0))
     else:
-        low_txt = "n/a"
+        low_txt = "—"
 
-    agree = state["agreement"]
-    colour = AMBER if leg["remaining"] > 14 else BLUE
-    if leg["remaining"] < 0:
-        colour = RED
+    marks = "✅" * state["hits"] + "❌" * (state["scored"] - state["hits"])
+    record = "%s  **%d / %d** within ±3d" % (marks or "—",
+                                                  state["hits"], state["scored"])
+
+    colour = VIOLET if leg["remaining"] < 0 else (BLUE if leg["remaining"] <= 14 else AMBER)
 
     fields = [
-        {"name": "Price",
-         "value": "%s  (%.1f%% from ATH %s)" % (_money(price), dd, _money(ath["price"])),
+        {"name": "\U0001f4b5  Price",
+         "value": "**%s**  ·  %s from ATH %s" % (_money(price), _pct(dd), _money(ath["price"])),
          "inline": False},
-        {"name": "Current leg  %s -> %s" % (ath["kind"].upper(), leg["to_kind"].upper()),
-         "value": "%s  %d / %d days  (%.1f%%)" % (
-             bar(leg["pct"]), leg["elapsed"], leg["span"], leg["pct"]),
+        {"name": "⏳  Cycle progress  —  %s → %s"
+                 % (ath["kind"].upper(), leg["to_kind"].upper()),
+         "value": "%s  **%.1f%%**\n`%d` of `%d` days  ·  `%d` remaining"
+                  % (bar(leg["pct"]), leg["pct"], leg["elapsed"], leg["span"], leg["remaining"]),
          "inline": False},
-        {"name": "Next projected pivot",
-         "value": "**%s %s** in **%d days**" % (
-             leg["to_kind"].upper(), leg["target_date"].isoformat(), leg["remaining"]),
+        {"name": "\U0001f3af  Next pivot",
+         "value": "**%s**\n%s" % (leg["target_date"].isoformat(), leg["to_kind"].upper()),
          "inline": True},
-        {"name": "Schedules", "value": agree, "inline": True},
-        {"name": "Lowest so far this leg", "value": low_txt, "inline": False},
-        {"name": "Prior cycle drawdowns", "value": hist_txt, "inline": True},
-        {"name": "Pattern record",
-         "value": "%d/%d projections within +/-3d" % (state["hits"], state["scored"]),
-         "inline": True},
+        {"name": "\U0001f9ed  Schedules",
+         "value": state["agreement"], "inline": True},
+        {"name": "\U0001fa78  Leg low so far", "value": low_txt, "inline": False},
+        {"name": "\U0001f4c9  Prior drawdowns", "value": hist_txt, "inline": True},
+        {"name": "\U0001f3c5  Pattern record", "value": record, "inline": True},
     ]
     return {
-        "title": "BTC Cycle Tracker - day %d of %d" % (leg["elapsed"], leg["span"]),
-        "description": ("Tracking the /biz/ 1064d/364d claim (No.56956841, 2023-12-12) "
-                        "that called the %s ATH.") % ath["date"].isoformat(),
+        "title": "⏳  BTC Cycle Tracker  ·  Day %d / %d" % (leg["elapsed"], leg["span"]),
+        "description": "*The /biz/ 1064d ⁄ 364d cycle — No.56956841, "
+                       "which called the %s top.*" % ath["date"].isoformat(),
         "color": colour,
         "fields": fields,
-        "footer": {"text": "timing model only - says nothing about price. not advice."},
-    }
-
-
-def alert_embed(kind, title, lines):
-    colours = {"new_ath": GREEN, "new_low": RED, "window": AMBER,
-               "resolved": BLUE, "in_band": 0x9B59B6}
-    return {
-        "title": title,
-        "description": "\n".join(lines),
-        "color": colours.get(kind, BLUE),
     }
 
 
 def window_embed(state):
-    """The ATL-window view. Foregrounds the one thing that is knowable in real
-    time - whether a new leg low printed inside the tolerance band - and is
-    explicit that a confirmed bottom is years away."""
+    """The ATL-window view. Foregrounds the one thing knowable in real time:
+    whether a new leg low printed inside the tolerance band."""
     leg = state["leg"]
     prov = state["provisional"]
-    band_lo = leg["target_date"] - __import__("datetime").timedelta(days=state["tolerance"])
-    band_hi = leg["target_date"] + __import__("datetime").timedelta(days=state["tolerance"])
+    band_lo, band_hi = _band(leg, state["tolerance"])
     in_band = prov and band_lo <= prov["date"] <= band_hi
 
-    lines = [
-        "Band: **%s -> %s** (+/-%dd around %s)" % (
-            band_lo.isoformat(), band_hi.isoformat(),
-            state["tolerance"], leg["target_date"].isoformat()),
-        "T-minus: **%d days**" % leg["remaining"],
-        "",
-        "Leg low so far: **%s** on **%s**, stood **%d days**" % (
-            _money(prov["price"]), prov["date"].isoformat(), prov["stood_days"]),
-        "Confidence it is THE low: **%s**" % prov["confidence"],
-        "New leg lows this cycle: **%d**" % state["new_low_count"],
-        "",
-        ("**A new leg low HAS printed inside the band.**" if in_band
-         else "No leg low inside the band yet."),
+    fields = [
+        {"name": "\U0001f5d3️  Target band",
+         "value": "**%s → %s**\n±%dd around `%s`"
+                  % (band_lo.isoformat(), band_hi.isoformat(),
+                     state["tolerance"], leg["target_date"].isoformat()),
+         "inline": True},
+        {"name": "⏱️  T-minus",
+         "value": "**%d days**" % leg["remaining"], "inline": True},
+        {"name": "\U0001fa78  Leg low so far",
+         "value": "**%s**  ·  `%s`\nheld **%d days**  ·  %d new lows this leg"
+                  % (_money(prov["price"]), prov["date"].isoformat(),
+                     prov["stood_days"], state["new_low_count"]),
+         "inline": False},
+        {"name": "\U0001f52e  Confidence it is THE low",
+         "value": prov["confidence"], "inline": False},
+        {"name": "\U0001f6a8  Status" if in_band else "\U0001f4cd  Status",
+         "value": ("**A new leg low HAS printed inside the band.**"
+                   if in_band else "No leg low inside the band yet."),
+         "inline": False},
     ]
     return {
-        "title": "ATL WINDOW - %s +/-%dd" % (leg["target_date"].isoformat(), state["tolerance"]),
-        "description": "\n".join(lines),
-        "color": 0x9B59B6 if in_band else AMBER,
-        "footer": {"text": "no reliable real-time bottom detector exists in this data "
-                           "(n=3 cycles, all discriminators overlap) - a confirmed ATL "
-                           "needs the next confirmed ATH, ~2029."},
+        "title": "\U0001f3af  ATL WINDOW  ·  %s ±%dd"
+                 % (leg["target_date"].isoformat(), state["tolerance"]),
+        "color": VIOLET if in_band else AMBER,
+        "fields": fields,
     }
 
 
+ALERT_STYLE = {
+    "new_ath":  ("\U0001f680", GREEN),
+    "new_low":  ("\U0001f53b", RED),
+    "in_band":  ("\U0001f3af", VIOLET),
+    "window":   ("⚠️", AMBER),
+    "resolved": ("\U0001f4cb", BLUE),
+    "hit":      ("✅", GREEN),
+    "miss":     ("❌", RED),
+}
+
+
+def alert_embed(kind, title, lines):
+    emoji, colour = ALERT_STYLE.get(kind, ("\U0001f4cc", BLUE))
+    return {
+        "title": "%s  %s" % (emoji, title),
+        "description": "\n".join(lines),
+        "color": colour,
+    }
+
+
+# ---------------------------------------------------------------------------
+# rendering / transport
+# ---------------------------------------------------------------------------
+
 def render_text(embeds):
     """What --dry-run prints. Same content, terminal-shaped."""
+    def plain(s):
+        return s.replace("`", "").replace("**", "").replace("*", "")
+
     out = []
     for e in embeds:
-        out.append("=" * 62)
-        out.append(e["title"])
+        out.append("=" * 64)
+        out.append(plain(e["title"]))
         if e.get("description"):
-            out.append(e["description"].replace("**", ""))
+            out.append(plain(e["description"]))
         if e.get("fields"):
-            out.append("-" * 62)
+            out.append("-" * 64)
         for f in e.get("fields", []):
-            out.append("%s:" % f["name"])
-            out.append("   " + f["value"].replace("`", "").replace("**", ""))
+            out.append(plain(f["name"]))
+            for line in plain(f["value"]).split("\n"):
+                out.append("    " + line)
         if e.get("footer"):
-            out.append("-" * 62)
+            out.append("-" * 64)
             out.append(e["footer"]["text"])
-    out.append("=" * 62)
+    out.append("=" * 64)
     return "\n".join(out)
 
 

@@ -112,14 +112,14 @@ class TestProvisionalLow(unittest.TestCase):
         self.assertEqual(p["stood_days"], 45)
 
     def test_confidence_is_calibrated_to_the_176d_false_low(self):
-        self.assertIn("weak", pv.confidence(34))
-        self.assertIn("tentative", pv.confidence(90))
-        self.assertIn("likely", pv.confidence(pv.FALSE_LOW_TYPICAL_STAND))
-        self.assertIn("strong", pv.confidence(pv.FALSE_LOW_MAX_STAND + 1))
+        self.assertIn("weak", pv.confidence(34).lower())
+        self.assertIn("tentative", pv.confidence(90).lower())
+        self.assertIn("likely", pv.confidence(pv.FALSE_LOW_TYPICAL_STAND).lower())
+        self.assertIn("strong", pv.confidence(pv.FALSE_LOW_MAX_STAND + 1).lower())
 
     def test_a_low_standing_176d_is_not_yet_strong(self):
         """The 2014-04-11 low held exactly this long and still broke."""
-        self.assertNotIn("strong", pv.confidence(pv.FALSE_LOW_MAX_STAND))
+        self.assertNotIn("strong", pv.confidence(pv.FALSE_LOW_MAX_STAND).lower())
 
 
 class TestSchedule(unittest.TestCase):

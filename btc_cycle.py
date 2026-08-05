@@ -245,10 +245,10 @@ def build_state(conn, series, ps, today):
         dates = sorted({r["projected_date"] for r in near})
         names = sorted({r["schedule"] for r in near})
         if len(dates) == 1:
-            agreement = "%s agree on %s" % ("+".join(names), dates[0])
+            agreement = "✅  %s\nagree on `%s`" % (" + ".join(names), dates[0])
         else:
-            agreement = "split: " + ", ".join(
-                "%s %s" % (r["schedule"], r["projected_date"]) for r in near)
+            agreement = "⚡  split\n" + "\n".join(
+                "`%s`  %s" % (r["projected_date"], r["schedule"]) for r in near)
     else:
         agreement = "n/a"
 
@@ -285,12 +285,15 @@ def resolve_projections(conn, ps, today):
             (r["id"], g["realized_date"].isoformat(), g["days_off"],
              1 if g["within_tolerance"] else 0, now_iso(), 0))
         alerts.append(report.alert_embed(
-            "resolved",
-            "Projection resolved - %s %s (%s)" % (r["kind"].upper(), r["projected_date"], r["schedule"]),
-            ["Realized: **%s**" % g["realized_date"].isoformat(),
-             "Off by: **%+d days**" % g["days_off"],
-             "Verdict: **%s**" % ("WITHIN +/-%dd" % r["tolerance_days"]
-                                  if g["within_tolerance"] else "MISS")]))
+            "hit" if g["within_tolerance"] else "miss",
+            "%s %s resolved  ·  %s"
+            % (r["kind"].upper(), r["projected_date"], r["schedule"]),
+            ["Projected  ·  `%s`" % r["projected_date"],
+             "Realized   ·  `%s`" % g["realized_date"].isoformat(),
+             "",
+             "**%+d days**  →  **%s**"
+             % (g["days_off"], "HIT, within ±%dd" % r["tolerance_days"]
+                if g["within_tolerance"] else "MISS")]))
     commit(conn)
     return alerts
 
@@ -342,8 +345,9 @@ def daily(conn, dry_run):
         kind = "new_ath" if p["kind"] == "ath" else "new_low"
         embeds.append(report.alert_embed(
             kind, "NEW CONFIRMED %s - %s" % (p["kind"].upper(), p["date"]),
-            ["Price: **%s**" % report._money(p["price"]),
-             "The pattern's current leg is now re-anchored on this pivot."]))
+            ["**%s**" % report._money(p["price"]),
+             "",
+             "The current leg is now re-anchored on this pivot."]))
 
     embeds += resolve_projections(conn, ps, today)
 
@@ -361,16 +365,18 @@ def daily(conn, dry_run):
         inside = band_lo <= c["date"] <= band_hi
         embeds.append(report.alert_embed(
             "in_band" if inside else "new_low",
-            "%sNew leg low - %s" % ("IN BAND: " if inside else "", c["date"]),
-            ["Low: **%s**  (%.1f%% off the %s ATH)"
+            "%sNew leg low  ·  %s" % ("IN BAND  —  " if inside else "", c["date"]),
+            ["**%s**  ·  %s off the %s ATH"
              % (report._money(c["low"]),
-                (c["low"] / leg["from"]["price"] - 1.0) * 100.0,
+                report._pct((c["low"] / leg["from"]["price"] - 1.0) * 100.0),
                 leg["from"]["date"].isoformat()),
-             "Leg low #%d. %s"
-             % (state["new_low_count"],
-                ("**Inside the +/-%dd band around %s.**"
-                 % (sch.TOLERANCE_DAYS, leg["target_date"].isoformat())) if inside
-                else "T-minus %d days to the projected low." % leg["remaining"])]))
+             "",
+             ("Leg low **#%d**  ·  **inside the ±%dd band** around `%s`"
+              % (state["new_low_count"], sch.TOLERANCE_DAYS,
+                 leg["target_date"].isoformat())) if inside
+             else "Leg low **#%d**  ·  T-minus **%d days** to `%s`"
+             % (state["new_low_count"], leg["remaining"],
+                leg["target_date"].isoformat())]))
 
     if leg["to_kind"] == "atl" and leg["remaining"] <= WINDOW_LEAD_DAYS and state["provisional"]:
         embeds.append(report.window_embed(state))
