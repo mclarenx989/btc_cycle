@@ -7,6 +7,7 @@
 import unittest
 from datetime import date, timedelta
 
+import anticipate as ant
 import btc_cycle as bc
 import pivots as pv
 import schedule as sch
@@ -219,6 +220,55 @@ class TestStaleness(unittest.TestCase):
     def test_reason_pluralises(self):
         self.assertIn("1 day ago", bc.staleness(date(2026, 8, 18), date(2026, 8, 19))["reason"])
         self.assertIn("3 days ago", bc.staleness(date(2026, 8, 16), date(2026, 8, 19))["reason"])
+
+
+class TestAnticipation(unittest.TestCase):
+    """The countdown must fire each tier exactly once, ever. The daily run
+    otherwise re-fires whichever tier it currently sits inside, every day."""
+
+    def test_tier_fires_once_then_never_again(self):
+        self.assertEqual(ant.due_milestone(47, set()), 60)
+        self.assertIsNone(ant.due_milestone(47, {60}))
+
+    def test_next_tier_fires_when_reached(self):
+        self.assertEqual(ant.due_milestone(30, {60}), 30)
+        self.assertEqual(ant.due_milestone(29, {60}), 30)
+
+    def test_skipped_tiers_report_where_we_actually_are(self):
+        """If runs are missed and the countdown jumps 8 -> 2, fire T-3 (where
+        we are), not T-7 (where we were)."""
+        self.assertEqual(ant.due_milestone(2, {60, 30, 14}), 3)
+
+    def test_firing_a_tier_retires_every_wider_one(self):
+        """Otherwise a run at T-2 fires T-3 and the next fires T-7 - a
+        countdown running backwards."""
+        self.assertEqual(ant.consumed_tiers(3), [60, 30, 14, 7, 3])
+        sent = set(ant.consumed_tiers(3))
+        self.assertIsNone(ant.due_milestone(2, sent))
+        # On the projected date itself the most urgent tier is T-0, not T-1.
+        self.assertEqual(ant.due_milestone(0, sent), 0)
+
+    def test_exhausted_when_all_tiers_sent(self):
+        self.assertIsNone(ant.due_milestone(0, set(ant.MILESTONES)))
+
+    def test_analogue_reports_distance_not_direction(self):
+        """The 'low was still ahead' reading is tautological - an ATL is the
+        leg's endpoint by definition. The distance above it is the content."""
+        pivots = [{"date": date(2021, 11, 10), "kind": "ath", "price": 69000.0},
+                  {"date": date(2022, 11, 21), "kind": "atl", "price": 15479.0}]
+        s = series([(date(2021, 11, 10) + timedelta(days=i), 30000, 30000)
+                    for i in range(1, 380)])
+        a = ant.analogue(s, pivots, 317, 68300.0)
+        self.assertEqual(a["n"], 1)
+        self.assertAlmostEqual(a["rows"][0]["above_pct"],
+                               (30000 / 15479.0 - 1) * 100, places=4)
+
+    def test_divergence_needs_every_prior_leg_to_have_printed_late(self):
+        prior_all_late = ant.divergence(
+            series([(date(2026, 1, 1), 10, 10)]),
+            [{"date": date(2025, 10, 6), "kind": "ath", "price": 1.0}],
+            [{"date": date(2026, 1, 1), "low": 10}], date(2026, 8, 19))
+        self.assertFalse(prior_all_late["diverging"])   # no completed legs
 
 
 if __name__ == "__main__":

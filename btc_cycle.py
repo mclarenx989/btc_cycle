@@ -24,6 +24,7 @@ import sqlite3
 import sys
 from datetime import date, datetime, timedelta, timezone
 
+import anticipate as ant
 import pivots as pv
 import report
 import schedule as sch
@@ -71,6 +72,8 @@ CREATE TABLE IF NOT EXISTS scores (
     projection_id INTEGER PRIMARY KEY REFERENCES projections(id),
     realized_date TEXT, days_off INTEGER, within_tolerance INTEGER,
     scored_at TEXT);
+CREATE TABLE IF NOT EXISTS alerts_sent (
+    key TEXT PRIMARY KEY, sent_at TEXT);
 CREATE TABLE IF NOT EXISTS snapshots (
     date TEXT PRIMARY KEY, price REAL, leg_kind TEXT, days_into_leg INTEGER,
     days_remaining INTEGER, drawdown_pct REAL);
@@ -121,6 +124,29 @@ def connect():
         conn.execute("ALTER TABLE scores ADD COLUMN provisional INTEGER DEFAULT 0")
         conn.commit()
     return conn
+
+
+def alert_sent(conn, key):
+    return conn.execute("SELECT 1 FROM alerts_sent WHERE key=?", (key,)).fetchone() is not None
+
+
+def mark_alert_sent(conn, key):
+    """One-shot bookkeeping. Without this the daily run re-fires whichever
+    countdown tier it currently sits inside, every single day."""
+    conn.execute("INSERT OR IGNORE INTO alerts_sent (key,sent_at) VALUES (?,?)",
+                 (key, now_iso()))
+    commit(conn)
+
+
+def sent_milestones(conn, target):
+    out = set()
+    for r in conn.execute("SELECT key FROM alerts_sent WHERE key LIKE ?",
+                          ("milestone:%s:%%" % target.isoformat(),)):
+        try:
+            out.add(int(r["key"].rsplit(":", 1)[1]))
+        except (ValueError, IndexError):
+            continue
+    return out
 
 
 def save_candles(conn, rows):
@@ -273,7 +299,18 @@ def build_state(conn, series, ps, today):
     prov = pv.provisional_atl(series, ps[-1]["date"], today) if ps else None
     new_lows = pv.new_lows_since(series, ps[-1]["date"]) if ps else []
 
+    band_lo = leg["target_date"] - timedelta(days=sch.TOLERANCE_DAYS)
+    band_hi = leg["target_date"] + timedelta(days=sch.TOLERANCE_DAYS)
+    ana = ant.analogue(series, ps, leg["elapsed"], price)
+    if low is not None:
+        ana["current_above_running_low"] = (price / low["low"] - 1.0) * 100.0
+    div = ant.divergence(series, ps, new_lows, today)
+    must = ant.must_happen(band_lo, band_hi, prov, leg["remaining"]) if prov else ""
+    inval = ant.invalidations(leg["from"], price, prov, band_hi, today, new_lows)
+
     return {"leg": leg, "price": price, "pivots": ps, "running_low": low,
+            "band": (band_lo, band_hi), "analogue": ana, "must_happen": must,
+            "divergence": div, "invalidations": inval,
             "scored": scored, "hits": hits, "agreement": agreement, "today": today,
             "provisional": prov, "new_low_count": len(new_lows),
             "new_lows": new_lows, "tolerance": sch.TOLERANCE_DAYS}
@@ -439,7 +476,41 @@ def daily(conn, dry_run):
              % (state["new_low_count"], leg["remaining"],
                 leg["target_date"].isoformat())]))
 
+    # Countdown milestones. One-shot per target date: without the alerts_sent
+    # guard the daily run re-fires whichever tier it currently sits inside,
+    # every day, and the callout stops meaning anything.
+    tier = ant.due_milestone(leg["remaining"],
+                             sent_milestones(conn, leg["target_date"]))
+    if tier is not None and state["provisional"]:
+        keys = ["milestone:%s:%d" % (leg["target_date"].isoformat(), m)
+                for m in ant.consumed_tiers(tier)]
+        embeds.append(report.alert_embed(
+            "milestone",
+            "T-%d  ·  %s %s" % (leg["remaining"], leg["to_kind"].upper(),
+                                leg["target_date"].isoformat()),
+            [("Crossed the **T-%d** mark." % tier) if leg["remaining"] == tier
+             else ("Crossed the **T-%d** mark (firing late — first run since "
+                   "the countdown passed it)." % tier),
+             "",
+             "For the pattern to hit, %s." % state["must_happen"]]))
+        for k in keys:
+            mark_alert_sent(conn, k)
+
+    # Inside the band, say so once a day - that is the stretch where a new leg
+    # low is the whole question.
+    if band_lo <= today <= band_hi:
+        key = "band:%s:%s" % (leg["target_date"].isoformat(), today.isoformat())
+        if not alert_sent(conn, key):
+            embeds.append(report.alert_embed(
+                "in_band", "Inside the band  ·  day %d of %d"
+                % ((today - band_lo).days + 1, (band_hi - band_lo).days + 1),
+                ["Band `%s` → `%s`." % (band_lo.isoformat(), band_hi.isoformat()),
+                 "",
+                 "For the pattern to hit, %s." % state["must_happen"]]))
+            mark_alert_sent(conn, key)
+
     if leg["to_kind"] == "atl" and leg["remaining"] <= WINDOW_LEAD_DAYS and state["provisional"]:
+        embeds.append(report.anticipation_embed(state))
         embeds.append(report.window_embed(state))
 
     embeds.append(report.daily_embed(state))

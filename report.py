@@ -145,11 +145,75 @@ def window_embed(state):
     }
 
 
+def anticipation_embed(state):
+    """Forward-looking view: what to watch for, and what would settle it.
+
+    Every number here is measured, and the sample size travels with it - three
+    completed cycles is the whole evidence base and the reader has to see that
+    in the same breath as the figure.
+    """
+    leg = state["leg"]
+    band_lo, band_hi = state["band"]
+    prov = state["provisional"]
+    ana = state["analogue"]
+    div = state["divergence"]
+
+    fields = [
+        {"name": "\U0001f3af  What must happen",
+         "value": "For the pattern to hit, %s.\n**%d days** left."
+                  % (state["must_happen"], leg["remaining"]),
+         "inline": False},
+    ]
+
+    if ana["rows"]:
+        lines = ["`%s`  **%+.0f%%** above its eventual low"
+                 % (r["year"], r["above_pct"]) for r in ana["rows"]]
+        lo, hi = ana["implied_low"]
+        lines.append("")
+        lines.append("Today: **%+.0f%%** above the running low."
+                     % ana["current_above_running_low"])
+        lines.append("Same distances imply a low of **%s – %s**."
+                     % (_money(lo), _money(hi)))
+        lines.append("*n=%d completed cycles; the spread is %.0f points wide, "
+                     "so this is context, not a forecast.*"
+                     % (ana["n"],
+                        max(r["above_pct"] for r in ana["rows"])
+                        - min(r["above_pct"] for r in ana["rows"])))
+        fields.append({"name": "\U0001f4d0  At day %d of prior down legs" % leg["elapsed"],
+                       "value": "\n".join(lines), "inline": False})
+
+    if div["prior"]:
+        dl = ["`%s`  %d new lows, **%d** in its final %dd"
+              % (p["year"], p["total"], p["late"], 60) for p in div["prior"]]
+        dl.append("")
+        dl.append("This leg: **%d days** since the last new low (%s)."
+                  % (div["quiet_days"], prov["date"].isoformat()))
+        if div["diverging"]:
+            dl.append("\u26a0\ufe0f  **Diverging** — every prior leg was still "
+                      "printing new lows this late.")
+        fields.append({"name": "\U0001f4e1  Divergence", "value": "\n".join(dl),
+                       "inline": False})
+
+    iv = ["%s  %s\n\u2003*%s*"
+          % ("\u2705" if i["triggered"] else "\u2b1c", i["condition"], i["detail"])
+          for i in state["invalidations"]]
+    fields.append({"name": "\u2620\ufe0f  Pre-registered invalidation",
+                   "value": "\n".join(iv), "inline": False})
+
+    return {
+        "title": "\U0001f52d  Anticipation  \u00b7  %s %s"
+                 % (leg["to_kind"].upper(), leg["target_date"].isoformat()),
+        "color": VIOLET if div.get("diverging") else BLUE,
+        "fields": fields,
+    }
+
+
 ALERT_STYLE = {
     "new_ath":  ("\U0001f680", GREEN),
     "new_low":  ("\U0001f53b", RED),
     "in_band":  ("\U0001f3af", VIOLET),
     "window":   ("⚠️", AMBER),
+    "milestone": ("\u23f3", AMBER),
     "resolved": ("\U0001f4cb", BLUE),
     "stale":    ("\U0001f6d1", RED),
     "hit":      ("✅", GREEN),
