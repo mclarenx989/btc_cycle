@@ -7,6 +7,7 @@
 import unittest
 from datetime import date, timedelta
 
+import btc_cycle as bc
 import pivots as pv
 import schedule as sch
 import score as sc
@@ -190,6 +191,34 @@ class TestScore(unittest.TestCase):
         rows = sc.score_claimed_legs(realized, sch.CLAIMED_LEGS)
         self.assertEqual([r["delta"] for r in rows], [4, -1, -3, 12])
         self.assertEqual(sum(1 for r in rows if r["within_tolerance"]), 2)
+
+
+class TestStaleness(unittest.TestCase):
+    """Both observed production failures were DNS outages at 09:10 that the
+    daily job could not report, because it never started. These pin the
+    threshold the separate watchdog uses."""
+
+    def test_same_day_run_is_fresh(self):
+        st = bc.staleness(date(2026, 8, 19), date(2026, 8, 19))
+        self.assertEqual(st["age_days"], 0)
+        self.assertFalse(st["stale"])
+
+    def test_one_missed_day_is_tolerated(self):
+        """A single miss is a transient blip the 7-day refetch already heals."""
+        self.assertFalse(bc.staleness(date(2026, 8, 18), date(2026, 8, 19))["stale"])
+
+    def test_threshold_is_exclusive_at_two_days(self):
+        self.assertFalse(bc.staleness(date(2026, 8, 17), date(2026, 8, 19))["stale"])
+        self.assertTrue(bc.staleness(date(2026, 8, 16), date(2026, 8, 19))["stale"])
+
+    def test_never_run_is_stale(self):
+        st = bc.staleness(None, date(2026, 8, 19))
+        self.assertTrue(st["stale"])
+        self.assertIsNone(st["age_days"])
+
+    def test_reason_pluralises(self):
+        self.assertIn("1 day ago", bc.staleness(date(2026, 8, 18), date(2026, 8, 19))["reason"])
+        self.assertIn("3 days ago", bc.staleness(date(2026, 8, 16), date(2026, 8, 19))["reason"])
 
 
 if __name__ == "__main__":

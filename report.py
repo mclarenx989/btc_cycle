@@ -151,6 +151,7 @@ ALERT_STYLE = {
     "in_band":  ("\U0001f3af", VIOLET),
     "window":   ("⚠️", AMBER),
     "resolved": ("\U0001f4cb", BLUE),
+    "stale":    ("\U0001f6d1", RED),
     "hit":      ("✅", GREEN),
     "miss":     ("❌", RED),
 }

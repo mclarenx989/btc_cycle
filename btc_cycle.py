@@ -10,7 +10,9 @@ so the claim stays falsifiable instead of becoming folklore.
 
     python3 btc_cycle.py --backfill   # replay history, seed pivots+projections
     python3 btc_cycle.py --verify     # realized legs vs the post's claims
+    python3 btc_cycle.py --window     # ATL-window view, no post
     python3 btc_cycle.py --dry-run    # full run, print instead of posting
+    python3 btc_cycle.py --healthcheck  # alert if the daily run is overdue
     python3 btc_cycle.py              # daily run, posts to Discord
 
 Stdlib only. Python 3.9 compatible - no X | None unions.
@@ -87,11 +89,27 @@ WINDOW_LEAD_DAYS = 90
 # committed its grades would burn the real notification.
 DRY_RUN = False
 
+# A run is overdue after this many days. Two, not one: the job is daily, so a
+# single miss is a transient network blip that the 7-day trailing refetch
+# already heals. Two consecutive misses means something is actually wrong.
+STALE_DAYS = 2
+
 
 def commit(conn):
     if DRY_RUN:
         return
     conn.commit()
+
+
+def staleness(last_run, today, max_age=STALE_DAYS):
+    """Pure. How long since the last successful run, and is that a problem."""
+    if last_run is None:
+        return {"age_days": None, "stale": True,
+                "reason": "no successful run has ever been recorded"}
+    age = (today - last_run).days
+    return {"age_days": age, "stale": age > max_age,
+            "reason": "last successful run %s, %d day%s ago"
+                      % (last_run.isoformat(), age, "" if age == 1 else "s")}
 
 
 def connect():
@@ -323,6 +341,49 @@ def window(conn):
           % pv.FALSE_LOW_MAX_STAND)
 
 
+def healthcheck(conn, dry_run):
+    """Is the daily job actually running? Returns a process exit code.
+
+    This exists as a SEPARATE entry point with its own launchd job because the
+    daily run cannot alert on its own non-execution - if the machine has no
+    network at 09:10 the script never starts, and a check living inside it
+    would never execute either. That is exactly how the 2026-08-15 and
+    2026-08-19 failures went unnoticed. A second job later in the day, once
+    network is likely back, asks whether the morning run actually landed a
+    snapshot and shouts if it did not.
+    """
+    today = datetime.now(timezone.utc).date()
+    row = conn.execute("SELECT MAX(date) AS m FROM snapshots").fetchone()
+    last = date.fromisoformat(row["m"]) if row and row["m"] else None
+    st = staleness(last, today)
+
+    if not st["stale"]:
+        print("ok - %s" % st["reason"])
+        return 0
+
+    embed = report.alert_embed(
+        "stale", "Tracker has not run",
+        ["**%s**" % st["reason"],
+         "",
+         "Expected a run every day at 09:10. The price series self-heals on the "
+         "next successful run, but each missed day is a permanent hole in "
+         "`snapshots`.",
+         "",
+         "Check: `launchctl list | grep btccycle` and `logs/launchd.err`."])
+
+    if dry_run:
+        print(report.render_text([embed]))
+        print("\n[dry run - nothing posted]")
+        return 1
+    hook = os.environ.get("DISCORD_WEBHOOK_URL")
+    if not hook:
+        print("STALE and no webhook to report it: %s" % st["reason"], file=sys.stderr)
+        return 1
+    report.post(hook, [embed])
+    print("posted staleness alert - %s" % st["reason"])
+    return 1
+
+
 def daily(conn, dry_run):
     today = datetime.now(timezone.utc).date()
     series = load_candles(conn)
@@ -409,6 +470,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--window", action="store_true",
                     help="ATL-window view only, no post")
+    ap.add_argument("--healthcheck", action="store_true",
+                    help="alert if the daily run is overdue; exit 1 if stale")
     args = ap.parse_args()
     global DRY_RUN
     DRY_RUN = args.dry_run
@@ -419,6 +482,8 @@ def main():
         verify(conn)
     elif args.window:
         window(conn)
+    elif args.healthcheck:
+        sys.exit(healthcheck(conn, args.dry_run))
     else:
         daily(conn, args.dry_run)
 

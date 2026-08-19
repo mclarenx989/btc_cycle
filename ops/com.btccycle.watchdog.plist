@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.btccycle.watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/mclarenx989/btc_cycle/ops/run_btc_cycle.sh</string>
+        <string>--healthcheck</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/mclarenx989/btc_cycle</string>
+
+    <!-- 18:00 local, nine hours after the 09:10 daily job.
+
+         A separate job is the whole point: the daily run cannot report its own
+         non-execution. Both observed failures (2026-08-15, 2026-08-19) were
+         DNS outages at 09:10 — the script never started, so no check living
+         inside it could have fired. By evening the network is usually back and
+         this job can see that no snapshot landed and say so.
+
+         Nine hours of gap is deliberate. Too close to 09:10 and a slow or
+         retried morning run looks like a failure. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>18</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/mclarenx989/btc_cycle/logs/watchdog.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/mclarenx989/btc_cycle/logs/watchdog.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
