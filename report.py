@@ -7,6 +7,7 @@ schedule / score - this module never derives a number of its own.
 """
 
 import json
+import time
 import urllib.error
 import urllib.request
 from datetime import timedelta
@@ -216,6 +217,7 @@ ALERT_STYLE = {
     "milestone": ("\u23f3", AMBER),
     "resolved": ("\U0001f4cb", BLUE),
     "stale":    ("\U0001f6d1", RED),
+    "gap":      ("\U0001f4ed", RED),
     "hit":      ("✅", GREEN),
     "miss":     ("❌", RED),
 }
@@ -258,16 +260,33 @@ def render_text(embeds):
     return "\n".join(out)
 
 
-def post(webhook_url, embeds):
+class PostFailed(Exception):
+    """Delivery failed. Raised rather than exiting, so the caller can queue the
+    embeds instead of losing them - which is exactly what happened on
+    2026-08-27/28/29 and 2026-09-18: the alert was correct, and nobody saw it."""
+
+
+def post(webhook_url, embeds, attempts=3, delay=20):
+    """Deliver, retrying transient network failures.
+
+    The observed failure is DNS at wake ("nodename nor servname provided"),
+    which resolves within minutes. An HTTP error from Discord is NOT retried -
+    a 400 payload or a revoked webhook will fail identically every time.
+    """
     body = json.dumps({"embeds": embeds}).encode("utf-8")
     req = urllib.request.Request(
         webhook_url, data=body,
         headers={"Content-Type": "application/json", "User-Agent": "btc-cycle/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.status
-    except urllib.error.HTTPError as exc:
-        raise SystemExit("Discord rejected the post (%s): %s"
-                         % (exc.code, exc.read().decode("utf-8", "replace")[:300]))
-    except urllib.error.URLError as exc:
-        raise SystemExit("Could not reach Discord: %s" % exc.reason)
+    last = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status
+        except urllib.error.HTTPError as exc:
+            raise PostFailed("Discord rejected the post (%s): %s"
+                             % (exc.code, exc.read().decode("utf-8", "replace")[:300]))
+        except urllib.error.URLError as exc:
+            last = exc.reason
+            if attempt < attempts:
+                time.sleep(delay)
+    raise PostFailed("Could not reach Discord after %d attempts: %s" % (attempts, last))

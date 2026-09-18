@@ -1,24 +1,15 @@
 #!/bin/bash
 # Wrapper invoked by launchd. Pulls the Discord webhook from the macOS login
-# keychain, then runs the tracker. Passes through any arguments, so the
-# watchdog job invokes this same script with --healthcheck.
+# keychain, waits for DNS, then runs the tracker. Arguments pass through, so
+# the watchdog job invokes this same script with --healthcheck.
 #
-# Same pattern as the sibling kalshi/ops/run_kalshi.sh, but with its own
-# keychain service name ("btc-cycle-discord") so this tool's webhook is a
-# separate entry and can point at a different channel.
-#
-# One-time manual setup required before this will work:
+# One-time manual setup:
 #   security add-generic-password -a btc-cycle \
 #     -s btc-cycle-discord -w 'https://discord.com/api/webhooks/...'
-#
-# Discord is the only output here, so a missing entry is a hard failure rather
-# than a silent no-op — a quiet success and a broken webhook would otherwise
-# look identical.
 
 set -u
 
 cd /Users/mclarenx989/btc_cycle
-
 mkdir -p logs
 
 export DISCORD_WEBHOOK_URL="$(/usr/bin/security find-generic-password \
@@ -29,30 +20,56 @@ if [ -z "$DISCORD_WEBHOOK_URL" ]; then
     exit 1
 fi
 
+# Wait for DNS. launchd fires at 09:10, or immediately on wake if the machine
+# slept through the slot, and the network stack may not be up yet. The failure
+# is instant ("nodename nor servname provided"), not a timeout, so the run dies
+# in under a second and the day is lost. 9 of the first 44 days went exactly
+# this way. Same 10-minute poll as ~/kalshi/ops/run_kalshi.sh.
+#
+# discord.com is the host checked because delivery is the thing that must work:
+# price data has a two-source fallback, the alert has none.
+for attempt in $(seq 1 20); do
+    if /usr/bin/env python3 -c \
+        "import socket,sys; sys.exit(0 if socket.getaddrinfo('discord.com', 443) else 1)" \
+        2>/dev/null; then
+        break
+    fi
+    if [ "$attempt" -eq 20 ]; then
+        # Do NOT just exit. Queue the failure locally (a DB write, no network)
+        # so the next run that gets through reports this day instead of it
+        # vanishing. Kalshi's version exits here and loses the day.
+        echo "ERROR: DNS for discord.com never resolved (10 min)" >&2
+        /usr/bin/env python3 - <<'PY' || true
+import btc_cycle as bc, report
+conn = bc.connect()
+bc.queue_post(conn, [report.alert_embed(
+    "stale", "Run aborted — no DNS",
+    ["Waited 10 minutes for `discord.com` to resolve and gave up.",
+     "",
+     "Queued locally; you are seeing it because a later run got through."])])
+print("queued no-DNS alert")
+PY
+        exit 1
+    fi
+    sleep 30
+done
+
 /usr/bin/env python3 btc_cycle.py "$@"
 status=$?
 
-# Report our own death, but only for the daily run. --healthcheck exits 1 by
-# design when it finds staleness and has already posted its own alert; posting
-# again here would double up.
-#
-# This catches failures where the process ran and the network is usable (an API
-# 500, a bad payload). It CANNOT catch the case that actually bit us twice —
-# no DNS at 09:10 — because the post below fails for the same reason the run
-# did. That is what the separate watchdog job exists for; do not delete one
-# thinking the other covers it.
+# Non-zero from the daily run: queue a failure notice. --healthcheck exits 1 by
+# design when stale and has already queued/sent its own alert, so skip it.
 if [ "$status" -ne 0 ] && [ "${1:-}" != "--healthcheck" ]; then
     /usr/bin/env python3 - "$status" <<'PY' || true
-import os, sys
-import report
-report.post(os.environ["DISCORD_WEBHOOK_URL"], [report.alert_embed(
-    "stale", "Daily run failed",
-    ["Exited **%s**." % sys.argv[1],
-     "",
-     "The price series self-heals on the next successful run; the `snapshots` "
-     "row for today does not.",
-     "",
-     "See `logs/launchd.err`."])])
+import sys
+import btc_cycle as bc, report
+conn = bc.connect()
+embeds = [report.alert_embed("stale", "Daily run failed",
+    ["Exited **%s**." % sys.argv[1], "",
+     "See `logs/launchd.err`."])]
+hook = __import__("os").environ["DISCORD_WEBHOOK_URL"]
+bc.flush_pending(conn, hook)
+bc.deliver(conn, hook, embeds)
 PY
 fi
 

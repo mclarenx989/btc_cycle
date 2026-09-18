@@ -19,6 +19,7 @@ Stdlib only. Python 3.9 compatible - no X | None unions.
 """
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
@@ -72,6 +73,8 @@ CREATE TABLE IF NOT EXISTS scores (
     projection_id INTEGER PRIMARY KEY REFERENCES projections(id),
     realized_date TEXT, days_off INTEGER, within_tolerance INTEGER,
     scored_at TEXT);
+CREATE TABLE IF NOT EXISTS pending_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT, queued_at TEXT);
 CREATE TABLE IF NOT EXISTS alerts_sent (
     key TEXT PRIMARY KEY, sent_at TEXT);
 CREATE TABLE IF NOT EXISTS snapshots (
@@ -124,6 +127,57 @@ def connect():
         conn.execute("ALTER TABLE scores ADD COLUMN provisional INTEGER DEFAULT 0")
         conn.commit()
     return conn
+
+
+def queue_post(conn, embeds):
+    """Park embeds that could not be delivered.
+
+    Discord is the only output, so a failed post used to mean the alert simply
+    never existed - the watchdog correctly detected the 2026-08-25..29 outage
+    on three separate days and every one of those alerts died on the same DNS
+    failure that caused the outage. Queued embeds are flushed by the next run
+    that gets through."""
+    conn.execute("INSERT INTO pending_posts (payload,queued_at) VALUES (?,?)",
+                 (json.dumps(embeds), now_iso()))
+    commit(conn)
+
+
+def flush_pending(conn, hook):
+    """Deliver anything queued while the network was down. Oldest first.
+
+    Stops at the first failure and leaves the rest queued - if delivery is
+    still broken, draining the queue into the void would lose it for good.
+    """
+    rows = conn.execute(
+        "SELECT id,payload,queued_at FROM pending_posts ORDER BY id").fetchall()
+    sent = 0
+    for r in rows:
+        try:
+            embeds = json.loads(r["payload"])
+        except ValueError:
+            conn.execute("DELETE FROM pending_posts WHERE id=?", (r["id"],))
+            continue
+        for e in embeds:
+            e["title"] = "[delayed] " + e.get("title", "")
+        try:
+            report.post(hook, embeds)
+        except report.PostFailed:
+            break
+        conn.execute("DELETE FROM pending_posts WHERE id=?", (r["id"],))
+        sent += 1
+    commit(conn)
+    return sent
+
+
+def deliver(conn, hook, embeds):
+    """Post, or queue for the next run that can. Returns True if delivered."""
+    try:
+        report.post(hook, embeds)
+        return True
+    except report.PostFailed as exc:
+        queue_post(conn, embeds)
+        print("queued %d embed(s) for later: %s" % (len(embeds), exc), file=sys.stderr)
+        return False
 
 
 def alert_sent(conn, key):
@@ -416,8 +470,9 @@ def healthcheck(conn, dry_run):
     if not hook:
         print("STALE and no webhook to report it: %s" % st["reason"], file=sys.stderr)
         return 1
-    report.post(hook, [embed])
-    print("posted staleness alert - %s" % st["reason"])
+    flush_pending(conn, hook)
+    deliver(conn, hook, [embed])
+    print("staleness alert - %s" % st["reason"])
     return 1
 
 
@@ -433,12 +488,30 @@ def daily(conn, dry_run):
         save_candles(conn, recent)
         series = load_candles(conn)
 
+    # A gap is only visible to the run that ends it. Nothing on this machine
+    # can alert while the machine is offline, so the first run back reports how
+    # many days were lost - otherwise an outage looks exactly like a quiet
+    # market, which is what happened across 2026-08-25..29.
+    prev = conn.execute("SELECT MAX(date) AS m FROM snapshots").fetchone()
+    gap_days = 0
+    if prev and prev["m"]:
+        gap_days = (today - date.fromisoformat(prev["m"])).days - 1
+
     found = pv.detect(series)
     fresh = save_pivots(conn, found)
     ps = load_pivots(conn)
     save_projections(conn, sch.all_projections(ps))
 
     embeds = []
+    if gap_days > 0:
+        embeds.append(report.alert_embed(
+            "gap", "%d day%s missed" % (gap_days, "" if gap_days == 1 else "s"),
+            ["Last successful run **%s**, this one **%s**."
+             % (prev["m"], today.isoformat()),
+             "",
+             "Price history self-heals (7-day trailing refetch); the `snapshots` "
+             "rows for those days do not."]))
+
     for p in fresh:
         kind = "new_ath" if p["kind"] == "ath" else "new_low"
         embeds.append(report.alert_embed(
@@ -530,8 +603,14 @@ def daily(conn, dry_run):
     if not hook:
         raise SystemExit("No DISCORD_WEBHOOK_URL. Discord is the only output, so "
                          "this is a hard failure rather than a silent no-op.")
-    report.post(hook, embeds)
-    print("posted %d embed(s)" % len(embeds))
+    flushed = flush_pending(conn, hook)
+    if flushed:
+        print("flushed %d queued post(s)" % flushed)
+    if deliver(conn, hook, embeds):
+        print("posted %d embed(s)" % len(embeds))
+    else:
+        raise SystemExit("delivery failed; %d embed(s) queued for the next run"
+                         % len(embeds))
 
 
 def main():

@@ -271,5 +271,72 @@ class TestAnticipation(unittest.TestCase):
         self.assertFalse(prior_all_late["diverging"])   # no completed legs
 
 
+class TestDelivery(unittest.TestCase):
+    """Discord is the only output, so a failed post used to mean the alert
+    never existed. The watchdog correctly caught the 2026-08-25..29 outage on
+    three days and every one of those alerts died on the same DNS failure."""
+
+    def setUp(self):
+        import tempfile, btc_cycle as bc, report
+        self.bc, self.report = bc, report
+        self._db = bc.DB_PATH
+        self._post = report.post
+        fd = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        fd.close()
+        bc.DB_PATH = fd.name
+        self.conn = bc.connect()
+
+    def tearDown(self):
+        import os
+        self.bc.DB_PATH = self._db
+        self.report.post = self._post
+        try:
+            os.unlink(self.conn.execute("PRAGMA database_list").fetchone()[2])
+        except OSError:
+            pass
+
+    def _fail(self, *a, **k):
+        raise self.report.PostFailed("simulated outage")
+
+    def test_failed_delivery_is_queued_not_lost(self):
+        self.report.post = self._fail
+        ok = self.bc.deliver(self.conn, "http://x", [{"title": "alert"}])
+        self.assertFalse(ok)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM pending_posts").fetchone()[0], 1)
+
+    def test_queue_is_flushed_and_marked_delayed(self):
+        self.report.post = self._fail
+        self.bc.deliver(self.conn, "http://x", [{"title": "alert"}])
+        seen = []
+        self.report.post = lambda h, e, **k: seen.append(e) or 204
+        self.assertEqual(self.bc.flush_pending(self.conn, "http://x"), 1)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM pending_posts").fetchone()[0], 0)
+        self.assertTrue(seen[0][0]["title"].startswith("[delayed]"))
+
+    def test_still_broken_delivery_does_not_drain_the_queue(self):
+        """Flushing into a dead connection would lose the alerts for good."""
+        self.report.post = self._fail
+        self.bc.deliver(self.conn, "http://x", [{"title": "a"}])
+        self.bc.deliver(self.conn, "http://x", [{"title": "b"}])
+        self.assertEqual(self.bc.flush_pending(self.conn, "http://x"), 0)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM pending_posts").fetchone()[0], 2)
+
+    def test_http_errors_are_not_retried(self):
+        """A 400 payload or revoked webhook fails identically every time;
+        retrying just burns 40 seconds before the same outcome."""
+        import io, urllib.error, urllib.request
+        orig = urllib.request.urlopen
+        urllib.request.urlopen = lambda *a, **k: (_ for _ in ()).throw(
+            urllib.error.HTTPError("u", 400, "Bad", {}, io.BytesIO(b"nope")))
+        try:
+            with self.assertRaises(self.report.PostFailed):
+                self.report.post("http://x", [{"title": "t"}], attempts=3, delay=99)
+        finally:
+            urllib.request.urlopen = orig
+
+
 if __name__ == "__main__":
     unittest.main()
