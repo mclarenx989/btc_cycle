@@ -162,8 +162,9 @@ def main():
             st["ref_price"] = last
             changed = True
 
-    st["last_run"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    st["last_price"] = last
+    if changed:
+        st["last_run"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        st["last_price"] = last
 
     if alerts:
         hook = os.environ.get("DISCORD_WEBHOOK_URL")
@@ -178,9 +179,14 @@ def main():
                  _money(prior_low) if prior_low else "n/a",
                  ((prior_low / last - 1.0) * 100.0) if prior_low else 0.0))
 
-    with open(STATE, "w") as fh:
-        json.dump(st, fh, indent=2, sort_keys=True)
-        fh.write("\n")
+    # Only touch the file when something meaningful moved. Stamping last_run
+    # every pass made the file differ on every run, and the workflow commits on
+    # any diff - 96 commits a day saying nothing. The run log already records
+    # the current price each pass; this file is for dedup state only.
+    if changed:
+        with open(STATE, "w") as fh:
+            json.dump(st, fh, indent=2, sort_keys=True)
+            fh.write("\n")
     print("STATE_CHANGED=%s" % ("1" if changed else "0"))
     return 0
 
