@@ -271,6 +271,62 @@ class TestAnticipation(unittest.TestCase):
         self.assertFalse(prior_all_late["diverging"])   # no completed legs
 
 
+class TestEvaluate(unittest.TestCase):
+    """The 2026-10-09 bug: grade() matched the 2026-10-05 ATL projection to the
+    2022-11-21 pivot, 1,414 days away, and would have written days_off=-1414
+    permanently into the write-once ledger."""
+
+    def setUp(self):
+        self.pivots = [
+            {"date": date(2018, 12, 15), "kind": "atl", "price": 3122.0},
+            {"date": date(2022, 11, 21), "kind": "atl", "price": 15479.0},
+            {"date": date(2025, 10, 6), "kind": "ath", "price": 126272.0},
+        ]
+        self.proj = {"date": date(2026, 10, 5), "kind": "atl"}
+        self.low = {"date": date(2026, 7, 1), "price": 57734.63}
+
+    def test_a_pivot_a_leg_length_away_is_not_a_match(self):
+        self.assertIsNone(sc.grade(self.proj, self.pivots))
+
+    def test_window_still_open_is_not_graded(self):
+        self.assertIsNone(
+            sc.evaluate(self.proj, self.pivots, self.low, date(2026, 10, 7)))
+
+    def test_running_low_stands_in_and_is_marked_provisional(self):
+        """An ATL cannot be confirmed until the next ATH confirms, years out."""
+        g = sc.evaluate(self.proj, self.pivots, self.low, date(2026, 10, 9))
+        self.assertEqual(g["days_off"], -96)
+        self.assertTrue(g["provisional"])
+        self.assertFalse(g["within_tolerance"])
+
+    def test_no_candidate_records_none_not_a_fabricated_number(self):
+        g = sc.evaluate(self.proj, self.pivots, None, date(2026, 10, 9))
+        self.assertIsNone(g["days_off"])
+        self.assertIsNone(g["realized_date"])
+
+    def test_a_low_inside_the_band_is_a_provisional_hit(self):
+        g = sc.evaluate(self.proj, self.pivots,
+                        {"date": date(2026, 10, 4), "price": 50000.0},
+                        date(2026, 10, 9))
+        self.assertEqual(g["days_off"], -1)
+        self.assertTrue(g["within_tolerance"])
+        self.assertTrue(g["provisional"])
+
+    def test_a_confirmed_pivot_outranks_the_provisional_low(self):
+        pivots = self.pivots + [{"date": date(2026, 10, 4), "kind": "atl",
+                                 "price": 50000.0}]
+        g = sc.evaluate(self.proj, pivots, self.low, date(2026, 10, 9))
+        self.assertFalse(g["provisional"])
+        self.assertEqual(g["days_off"], -1)
+
+    def test_historical_grades_are_unchanged_by_the_bound(self):
+        """The two rows already in the ledger must not move."""
+        g = sc.grade({"date": date(2022, 11, 7), "kind": "atl"}, self.pivots)
+        self.assertEqual(g["days_off"], 14)
+        g = sc.grade({"date": date(2025, 10, 6), "kind": "ath"}, self.pivots)
+        self.assertEqual(g["days_off"], 0)
+
+
 class TestDelivery(unittest.TestCase):
     """Discord is the only output, so a failed post used to mean the alert
     never existed. The watchdog correctly caught the 2026-08-25..29 outage on

@@ -370,39 +370,70 @@ def build_state(conn, series, ps, today):
             "new_lows": new_lows, "tolerance": sch.TOLERANCE_DAYS}
 
 
-def resolve_projections(conn, ps, today):
-    """Grade every projection whose window has closed and is not yet scored."""
+def resolve_projections(conn, series, ps, today):
+    """Grade every projection whose window has closed, and re-grade any
+    provisional verdict that can now be settled.
+
+    Not one-shot any more. A provisional grade is a placeholder standing in for
+    evidence that cannot exist yet - an ATL is only confirmed once the NEXT ATH
+    confirms, years later - so it must be revisited. Only a CHANGE in verdict
+    alerts; re-posting the same provisional result every morning would be noise.
+    """
     alerts = []
+    prov = pv.provisional_atl(series, ps[-1]["date"], today) if ps else None
+
     rows = conn.execute(
-        "SELECT p.* FROM projections p LEFT JOIN scores s ON s.projection_id=p.id "
-        "WHERE s.projection_id IS NULL").fetchall()
+        "SELECT p.*, s.days_off AS old_days, s.within_tolerance AS old_ok, "
+        "       s.provisional AS old_prov, s.realized_date AS old_realized "
+        "FROM projections p LEFT JOIN scores s ON s.projection_id = p.id "
+        "WHERE s.projection_id IS NULL OR s.provisional = 1").fetchall()
+
     for r in rows:
         proj = {"date": date.fromisoformat(r["projected_date"]), "kind": r["kind"]}
-        if not sc.resolvable(proj, ps, today, r["tolerance_days"]):
-            continue
-        g = sc.grade(proj, ps, r["tolerance_days"])
+        g = sc.evaluate(proj, ps, prov, today, r["tolerance_days"])
         if g is None:
             continue
-        # Name the columns. A positional VALUES list silently breaks the first
-        # time a migration adds one - and the next projection to resolve is the
-        # 2026-10-05 ATL, so that break would have landed in the window this
-        # tool exists to watch.
+
+        had = r["old_realized"] is not None or r["old_days"] is not None
+        unchanged = (had
+                     and r["old_days"] == g["days_off"]
+                     and bool(r["old_ok"]) == bool(g["within_tolerance"])
+                     and bool(r["old_prov"]) == bool(g["provisional"]))
+        if unchanged:
+            continue
+
         conn.execute(
             "INSERT OR REPLACE INTO scores "
-            "(projection_id, realized_date, days_off, within_tolerance, scored_at, provisional) "
-            "VALUES (?,?,?,?,?,?)",
-            (r["id"], g["realized_date"].isoformat(), g["days_off"],
-             1 if g["within_tolerance"] else 0, now_iso(), 0))
+            "(projection_id, realized_date, days_off, within_tolerance, "
+            " scored_at, provisional) VALUES (?,?,?,?,?,?)",
+            (r["id"],
+             g["realized_date"].isoformat() if g["realized_date"] else None,
+             g["days_off"], 1 if g["within_tolerance"] else 0,
+             now_iso(), 1 if g["provisional"] else 0))
+
+        if g["days_off"] is None:
+            verdict = ("**UNRESOLVED** — the band closed with no qualifying %s"
+                       % r["kind"].upper())
+            detail = ["Projected  ·  `%s`" % r["projected_date"],
+                      "Realized   ·  *nothing within %dd*" % sc.MAX_MATCH_DAYS]
+        else:
+            verdict = "**%+d days**  →  **%s%s**" % (
+                g["days_off"],
+                "HIT, within ±%dd" % r["tolerance_days"]
+                if g["within_tolerance"] else "MISS",
+                "  *(provisional)*" if g["provisional"] else "")
+            detail = ["Projected  ·  `%s`" % r["projected_date"],
+                      "Realized   ·  `%s`%s" % (g["realized_date"].isoformat(),
+                                                "  *(running leg low)*"
+                                                if g["provisional"] else "")]
+
+        title = "%s %s %s  ·  %s" % (
+            r["kind"].upper(), r["projected_date"],
+            "re-graded" if had else "resolved", r["schedule"])
         alerts.append(report.alert_embed(
             "hit" if g["within_tolerance"] else "miss",
-            "%s %s resolved  ·  %s"
-            % (r["kind"].upper(), r["projected_date"], r["schedule"]),
-            ["Projected  ·  `%s`" % r["projected_date"],
-             "Realized   ·  `%s`" % g["realized_date"].isoformat(),
-             "",
-             "**%+d days**  →  **%s**"
-             % (g["days_off"], "HIT, within ±%dd" % r["tolerance_days"]
-                if g["within_tolerance"] else "MISS")]))
+            title, detail + ["", verdict]))
+
     commit(conn)
     return alerts
 
@@ -520,7 +551,7 @@ def daily(conn, dry_run):
              "",
              "The current leg is now re-anchored on this pivot."]))
 
-    embeds += resolve_projections(conn, ps, today)
+    embeds += resolve_projections(conn, series, ps, today)
 
     state = build_state(conn, series, ps, today)
     leg = state["leg"]
