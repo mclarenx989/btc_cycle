@@ -1,0 +1,8 @@
+{
+  "anchor_ath_date": "2025-10-06",
+  "anchor_ath_price": 126272.0,
+  "target_date": "2026-10-05",
+  "band": ["2026-10-02", "2026-10-08"],
+  "move_pct": 5.0,
+  "_note": "anchor_* change only when a new cycle ATH confirms (~2029). The leg low is NOT stored here - watch.py recomputes it from exchange data every run so the cloud watcher never depends on the Mac having pushed."
+}
