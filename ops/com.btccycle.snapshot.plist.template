@@ -13,11 +13,11 @@
     <key>WorkingDirectory</key>
     <string>__PROJECT_DIR__</string>
 
-    <!-- 09:10 local, ten minutes after the Kalshi job, so the two Discord
+    <!-- 09:10 local, ten minutes after a sibling tracker's job, so the two Discord
          posts do not land in the same second and the logs stay readable if
          both fail on the same network blip. No jitter: this hits public
          exchange APIs where a predictable daily timestamp makes the price
-         series cleaner, same reasoning as the Kalshi plist. -->
+         series cleaner, same reasoning as that sibling's plist. -->
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
