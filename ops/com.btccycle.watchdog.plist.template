@@ -7,12 +7,12 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/mclarenx989/btc_cycle/ops/run_btc_cycle.sh</string>
+        <string>__PROJECT_DIR__/ops/run_btc_cycle.sh</string>
         <string>--healthcheck</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/mclarenx989/btc_cycle</string>
+    <string>__PROJECT_DIR__</string>
 
     <!-- 18:00 local, nine hours after the 09:10 daily job.
 
@@ -36,9 +36,9 @@
     <false/>
 
     <key>StandardOutPath</key>
-    <string>/Users/mclarenx989/btc_cycle/logs/watchdog.out</string>
+    <string>__PROJECT_DIR__/logs/watchdog.out</string>
     <key>StandardErrorPath</key>
-    <string>/Users/mclarenx989/btc_cycle/logs/watchdog.err</string>
+    <string>__PROJECT_DIR__/logs/watchdog.err</string>
 
     <key>EnvironmentVariables</key>
     <dict>

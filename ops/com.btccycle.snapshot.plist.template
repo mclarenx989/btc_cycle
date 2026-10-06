@@ -7,11 +7,11 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/mclarenx989/btc_cycle/ops/run_btc_cycle.sh</string>
+        <string>__PROJECT_DIR__/ops/run_btc_cycle.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/mclarenx989/btc_cycle</string>
+    <string>__PROJECT_DIR__</string>
 
     <!-- 09:10 local, ten minutes after the Kalshi job, so the two Discord
          posts do not land in the same second and the logs stay readable if
@@ -30,9 +30,9 @@
     <false/>
 
     <key>StandardOutPath</key>
-    <string>/Users/mclarenx989/btc_cycle/logs/launchd.out</string>
+    <string>__PROJECT_DIR__/logs/launchd.out</string>
     <key>StandardErrorPath</key>
-    <string>/Users/mclarenx989/btc_cycle/logs/launchd.err</string>
+    <string>__PROJECT_DIR__/logs/launchd.err</string>
 
     <key>EnvironmentVariables</key>
     <dict>

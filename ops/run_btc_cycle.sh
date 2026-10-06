@@ -9,7 +9,9 @@
 
 set -u
 
-cd /Users/mclarenx989/btc_cycle
+# Resolve the project root from this script's own location rather than a
+# baked-in path, so a clone works anywhere.
+cd "$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p logs
 
 export DISCORD_WEBHOOK_URL="$(/usr/bin/security find-generic-password \
@@ -24,7 +26,7 @@ fi
 # slept through the slot, and the network stack may not be up yet. The failure
 # is instant ("nodename nor servname provided"), not a timeout, so the run dies
 # in under a second and the day is lost. 9 of the first 44 days went exactly
-# this way. Same 10-minute poll as ~/kalshi/ops/run_kalshi.sh.
+# this way. Same 10-minute poll as ~/a sibling tracker's wrapper.
 #
 # discord.com is the host checked because delivery is the thing that must work:
 # price data has a two-source fallback, the alert has none.
@@ -37,7 +39,7 @@ for attempt in $(seq 1 20); do
     if [ "$attempt" -eq 20 ]; then
         # Do NOT just exit. Queue the failure locally (a DB write, no network)
         # so the next run that gets through reports this day instead of it
-        # vanishing. Kalshi's version exits here and loses the day.
+        # vanishing. the sibling's version exits here and loses the day.
         echo "ERROR: DNS for discord.com never resolved (10 min)" >&2
         /usr/bin/env python3 - <<'PY' || true
 import btc_cycle as bc, report

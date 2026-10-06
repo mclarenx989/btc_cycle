@@ -74,7 +74,7 @@ Day 302 of the projected 364-day down leg. Projected cycle low 2026-10-05,
 
 ## Architecture
 
-New project at `~/btc_cycle`, mirroring the existing `~/kalshi` tracker:
+New project at `~/btc_cycle`, mirroring the existing a sibling tracker on the same host tracker:
 stdlib-only Python (host runs 3.9.6 — no `X | None` union syntax), SQLite,
 Discord webhook read from the macOS keychain by an `ops/run_*.sh` wrapper,
 scheduled by launchd. Nothing to pip install.
@@ -232,9 +232,9 @@ Separate loud alerts, posted as their own embed:
 
 - Missing keychain webhook is a hard failure. Discord is the only output, so a
   silent no-op would be indistinguishable from a healthy quiet day. Matches the
-  Kalshi wrapper's behaviour.
+  the sibling tracker wrapper's behaviour.
 - API failure raises `SystemExit` with a readable message including status and
-  a truncated body, matching `kalshi_snapshot.py`.
+  a truncated body, matching the sibling tracker's snapshot script.
 - Coinbase failure falls back to Bitstamp before giving up.
 - A gap in the candle series is logged and skipped, not interpolated. Inventing
   a price could invent a pivot.
@@ -281,11 +281,11 @@ python3 btc_cycle.py               # daily run, posts to Discord
 ### Scheduling
 
 `ops/run_btc_cycle.sh` pulls the webhook from keychain service
-`btc-cycle-discord` (its own entry, separate from `kalshi-snapshot-discord`, so
+`btc-cycle-discord` (its own entry, separate from its own keychain entry, so
 it can point at a different channel), then execs the script.
 `ops/com.btccycle.snapshot.plist` runs it daily. No jitter — this hits public
 exchange APIs where a predictable timestamp makes the series cleaner, same
-reasoning as the Kalshi plist.
+reasoning as that sibling's plist.
 
 One-time manual setup, run by the user:
 
