@@ -54,6 +54,20 @@ def _band(leg, tolerance):
 # embeds
 # ---------------------------------------------------------------------------
 
+def _next_pivot_text(state, leg):
+    """After a leg ends, the next pivot is the next REGISTERED projection, not
+    the dead leg's target date sitting in the past."""
+    nxt = state.get("next_proj")
+    if not leg["ended"] or not nxt:
+        return "**%s**\n%s" % (leg["target_date"].isoformat(), leg["to_kind"].upper())
+    out = "**%s**\n%s" % (nxt["date"].isoformat(), nxt["kind"].upper())
+    out += "\n`%s`" % nxt.get("schedule", "")
+    if nxt.get("chains_unrealized"):
+        out += ("\n\u26a0\ufe0f *chains through the %s that never printed*"
+                % leg["to_kind"].upper())
+    return out
+
+
 def daily_embed(state):
     leg = state["leg"]
     ath = leg["from"]
@@ -87,13 +101,20 @@ def daily_embed(state):
         {"name": "\U0001f4b5  Price",
          "value": "**%s**  ·  %s from ATH %s" % (_money(price), _pct(dd), _money(ath["price"])),
          "inline": False},
-        {"name": "⏳  Cycle progress  —  %s → %s"
+        {"name": ("\u2705  Leg resolved  —  %s → %s"
+                  if leg["ended"] else "⏳  Cycle progress  —  %s → %s")
                  % (ath["kind"].upper(), leg["to_kind"].upper()),
-         "value": "%s  **%.1f%%**\n`%d` of `%d` days  ·  `%d` remaining"
-                  % (bar(leg["pct"]), leg["pct"], leg["elapsed"], leg["span"], leg["remaining"]),
+         "value": ("%s  **overran by %d days**\nprojected %d-day leg ended `%s` "
+                   "with no %s"
+                   % (bar(100.0), leg["elapsed"] - leg["span"], leg["span"],
+                      leg["target_date"].isoformat(), leg["to_kind"].upper()))
+                  if leg["ended"] else
+                  ("%s  **%.1f%%**\n`%d` of `%d` days  ·  `%d` remaining"
+                   % (bar(leg["pct"]), leg["pct"], leg["elapsed"], leg["span"],
+                      leg["remaining"])),
          "inline": False},
         {"name": "\U0001f3af  Next pivot",
-         "value": "**%s**\n%s" % (leg["target_date"].isoformat(), leg["to_kind"].upper()),
+         "value": _next_pivot_text(state, leg),
          "inline": True},
         {"name": "\U0001f9ed  Schedules",
          "value": state["agreement"], "inline": True},
@@ -102,7 +123,10 @@ def daily_embed(state):
         {"name": "\U0001f3c5  Pattern record", "value": record, "inline": True},
     ]
     return {
-        "title": "⏳  BTC Cycle Tracker  ·  Day %d / %d" % (leg["elapsed"], leg["span"]),
+        "title": ("\u2705  BTC Cycle Tracker  ·  leg resolved, day %d of a "
+                  "projected %d" if leg["ended"]
+                  else "⏳  BTC Cycle Tracker  ·  Day %d / %d")
+                 % (leg["elapsed"], leg["span"]),
         "description": "*The /biz/ 1064d ⁄ 364d cycle — No.56956841, "
                        "which called the %s top.*" % ath["date"].isoformat(),
         "color": colour,
@@ -124,8 +148,10 @@ def window_embed(state):
                   % (band_lo.isoformat(), band_hi.isoformat(),
                      state["tolerance"], leg["target_date"].isoformat()),
          "inline": True},
-        {"name": "⏱️  T-minus",
-         "value": "**%d days**" % leg["remaining"], "inline": True},
+        {"name": "\U0001f3c1  Outcome" if leg["ended"] else "⏱️  T-minus",
+         "value": ("**window closed**\n%d days ago" % -leg["remaining"])
+                  if leg["ended"] else "**%d days**" % leg["remaining"],
+         "inline": True},
         {"name": "\U0001fa78  Leg low so far",
          "value": "**%s**  ·  `%s`\nheld **%d days**  ·  %d new lows this leg"
                   % (_money(prov["price"]), prov["date"].isoformat(),
@@ -134,13 +160,15 @@ def window_embed(state):
         {"name": "\U0001f52e  Confidence it is THE low",
          "value": prov["confidence"], "inline": False},
         {"name": "\U0001f6a8  Status" if in_band else "\U0001f4cd  Status",
-         "value": ("**A new leg low HAS printed inside the band.**"
-                   if in_band else "No leg low inside the band yet."),
+         "value": ("**A new leg low HAS printed inside the band.**" if in_band else
+                   ("**No leg low printed inside the band.** The projection missed."
+                    if leg["ended"] else "No leg low inside the band yet.")),
          "inline": False},
     ]
     return {
-        "title": "\U0001f3af  ATL WINDOW  ·  %s ±%dd"
-                 % (leg["target_date"].isoformat(), state["tolerance"]),
+        "title": "%s  ATL WINDOW  ·  %s ±%dd"
+                 % ("\U0001f3c1" if leg["ended"] else "\U0001f3af",
+                    leg["target_date"].isoformat(), state["tolerance"]),
         "color": VIOLET if in_band else AMBER,
         "fields": fields,
     }
@@ -160,9 +188,13 @@ def anticipation_embed(state):
     div = state["divergence"]
 
     fields = [
-        {"name": "\U0001f3af  What must happen",
-         "value": "For the pattern to hit, %s.\n**%d days** left."
-                  % (state["must_happen"], leg["remaining"]),
+        {"name": "\U0001f3c1  What was required" if leg["ended"]
+                 else "\U0001f3af  What must happen",
+         "value": ("Required: %s.\n**Resolved %d days ago.**"
+                   % (state["must_happen"], -leg["remaining"]))
+                  if leg["ended"] else
+                  ("For the pattern to hit, %s.\n**%d days** left."
+                   % (state["must_happen"], leg["remaining"])),
          "inline": False},
     ]
 
@@ -175,6 +207,13 @@ def anticipation_embed(state):
                      % ana["current_above_running_low"])
         lines.append("Same distances imply a low of **%s – %s**."
                      % (_money(lo), _money(hi)))
+        if ana.get("all_analogues_above_running_low"):
+            lines.append("*Every analogue now implies a low at or above one that "
+                         "has already printed — all of them are consistent with "
+                         "the low already being in.*")
+        if ana.get("n_total") and ana["n"] < ana["n_total"]:
+            lines.append("*Sample is %d of %d cycles: shorter legs have no day %d.*"
+                         % (ana["n"], ana["n_total"], leg["elapsed"]))
         lines.append("*n=%d completed cycles; the spread is %.0f points wide, "
                      "so this is context, not a forecast.*"
                      % (ana["n"],

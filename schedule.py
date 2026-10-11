@@ -62,16 +62,28 @@ def oracle(steps=6):
     return rows
 
 
-def derived(pivots, steps=3):
-    """152w/52w applied to the latest REALIZED pivot."""
+def derived(pivots, steps=3, provisional_low=None):
+    """152w/52w applied to the latest realized pivot.
+
+    A CONFIRMED low cannot exist until the next ATH confirms, years out, so
+    for its whole life this chained from the last confirmed ATH and was
+    therefore identical to `oracle` - which is why it never once diverged and
+    was never independently tested. When a provisional low exists and is more
+    recent than the last confirmed pivot, anchor there instead: that low is
+    the best available estimate of what actually happened, which is the entire
+    point of calling this schedule "derived".
+    """
     if not pivots:
         return []
     last = pivots[-1]
-    rows = chain(last["date"], last["kind"], steps)
+    anchor_date, anchor_kind, note = last["date"], last["kind"], "realized"
+    if provisional_low is not None and provisional_low["date"] > last["date"]:
+        anchor_date, anchor_kind, note = provisional_low["date"], "atl", "provisional"
+    rows = chain(anchor_date, anchor_kind, steps)
     for r in rows:
         r["schedule"] = "derived"
-        r["basis"] = "364/1064 from realized %s %s" % (
-            last["kind"].upper(), last["date"].isoformat())
+        r["basis"] = "364/1064 from %s %s %s" % (
+            note, anchor_kind.upper(), anchor_date.isoformat())
     return rows
 
 
@@ -89,8 +101,9 @@ def ath_to_ath(pivots, steps=2):
     return rows
 
 
-def all_projections(pivots):
-    return oracle() + derived(pivots) + ath_to_ath(pivots)
+def all_projections(pivots, provisional_low=None):
+    return oracle() + derived(pivots, provisional_low=provisional_low) \
+        + ath_to_ath(pivots)
 
 
 def current_leg(pivots, today):
@@ -102,12 +115,21 @@ def current_leg(pivots, today):
     span = DOWN_LEG if last["kind"] == "ath" else UP_LEG
     target = last["date"] + timedelta(days=span)
     elapsed = (today - last["date"]).days
+    remaining = (target - today).days
     return {
         "from": last,
         "to_kind": nxt_kind,
         "target_date": target,
         "span": span,
         "elapsed": elapsed,
-        "remaining": (target - today).days,
-        "pct": (elapsed / float(span)) * 100.0,
+        "remaining": remaining,
+        # Clamp for display. The raw percentage is kept because the overshoot
+        # itself is information - the leg ran past its projected length.
+        "pct": min(100.0, (elapsed / float(span)) * 100.0),
+        "pct_raw": (elapsed / float(span)) * 100.0,
+        # The projected pivot date has passed and its tolerance band closed.
+        # Everything downstream that assumes a live countdown must branch here:
+        # a negative "T-minus" and a 101.6% progress bar are the symptoms of
+        # not doing so.
+        "ended": remaining < -TOLERANCE_DAYS,
     }

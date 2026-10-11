@@ -271,6 +271,88 @@ class TestAnticipation(unittest.TestCase):
         self.assertFalse(prior_all_late["diverging"])   # no completed legs
 
 
+class TestLegEnded(unittest.TestCase):
+    """Past its target date the tracker was emitting 'T-minus -6 days', a
+    101.6% progress bar, a next pivot five days in the past, and a schedule
+    agreement four years out. All of it traced to current_leg assuming the
+    leg is always live."""
+
+    def setUp(self):
+        self.ps = [{"date": date(2025, 10, 6), "kind": "ath", "price": 126272.0}]
+
+    def test_live_leg_is_not_ended(self):
+        leg = sch.current_leg(self.ps, date(2026, 10, 3))
+        self.assertFalse(leg["ended"])
+
+    def test_inside_tolerance_is_still_not_ended(self):
+        """The band is +/-3d; the leg is not over until it closes."""
+        self.assertFalse(sch.current_leg(self.ps, date(2026, 10, 8))["ended"])
+
+    def test_past_the_band_is_ended(self):
+        self.assertTrue(sch.current_leg(self.ps, date(2026, 10, 9))["ended"])
+
+    def test_progress_is_clamped_but_overshoot_is_kept(self):
+        leg = sch.current_leg(self.ps, date(2026, 10, 10))
+        self.assertEqual(leg["pct"], 100.0)
+        self.assertGreater(leg["pct_raw"], 100.0)
+        self.assertEqual(leg["elapsed"] - leg["span"], 5)
+
+
+class TestDerivedReanchor(unittest.TestCase):
+    """`derived` is defined as the rule applied to REALIZED pivots, but it
+    re-anchored only on CONFIRMED ones - and an ATL is not confirmable until
+    the next ATH confirms, ~2029. So it chained off the 2025 ATH identically
+    to `oracle` for its entire life and never once diverged."""
+
+    def setUp(self):
+        self.ps = [{"date": date(2025, 10, 6), "kind": "ath", "price": 126272.0}]
+        self.low = {"date": date(2026, 7, 1), "price": 57734.63}
+
+    def test_without_a_provisional_low_it_matches_oracle(self):
+        rows = sch.derived(self.ps, steps=1)
+        self.assertEqual(rows[0]["date"], date(2026, 10, 5))
+
+    def test_a_newer_provisional_low_becomes_the_anchor(self):
+        rows = sch.derived(self.ps, steps=1, provisional_low=self.low)
+        self.assertEqual(rows[0]["date"], date(2029, 5, 30))
+        self.assertIn("provisional", rows[0]["basis"])
+
+    def test_it_diverges_from_oracle_once_re_anchored(self):
+        d = sch.derived(self.ps, steps=1, provisional_low=self.low)[0]["date"]
+        o = [r for r in sch.oracle(steps=5) if r["kind"] == "ath"
+             and r["date"] > date(2026, 10, 10)][0]["date"]
+        self.assertNotEqual(d, o)
+        self.assertEqual((o - d).days, 96)
+
+    def test_an_older_provisional_low_is_ignored(self):
+        stale = {"date": date(2025, 1, 1), "price": 1.0}
+        rows = sch.derived(self.ps, steps=1, provisional_low=stale)
+        self.assertEqual(rows[0]["date"], date(2026, 10, 5))
+
+
+class TestAnalogueClamp(unittest.TestCase):
+    def test_implied_low_cannot_exceed_a_low_already_printed(self):
+        """It was reporting an upper bound of $76,111 when $57,735 had already
+        traded - a level the market had gone straight through."""
+        pivots = [{"date": date(2021, 11, 10), "kind": "ath", "price": 69000.0},
+                  {"date": date(2022, 11, 21), "kind": "atl", "price": 15479.0}]
+        s = series([(date(2021, 11, 10) + timedelta(days=i), 20000, 20000)
+                    for i in range(1, 380)])
+        a = ant.analogue(s, pivots, 317, 82971.0, running_low=57734.63)
+        lo, hi = a["implied_low"]
+        self.assertLessEqual(hi, 57734.63)
+        self.assertLessEqual(lo, hi)
+        self.assertTrue(a["all_analogues_above_running_low"])
+
+    def test_sample_size_provenance_is_reported(self):
+        pivots = [{"date": date(2021, 11, 10), "kind": "ath", "price": 69000.0},
+                  {"date": date(2022, 11, 21), "kind": "atl", "price": 15479.0}]
+        s = series([(date(2021, 11, 10) + timedelta(days=i), 20000, 20000)
+                    for i in range(1, 380)])
+        a = ant.analogue(s, pivots, 317, 82971.0, running_low=57734.63)
+        self.assertEqual(a["n_total"], 1)
+
+
 class TestEvaluate(unittest.TestCase):
     """The 2026-10-09 bug: grade() matched the 2026-10-05 ATL projection to the
     2022-11-21 pivot, 1,414 days away, and would have written days_off=-1414

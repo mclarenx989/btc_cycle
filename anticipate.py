@@ -51,7 +51,7 @@ def completed_down_legs(pivots):
             if a["kind"] == "ath" and b["kind"] == "atl"]
 
 
-def analogue(series, pivots, elapsed, price_now):
+def analogue(series, pivots, elapsed, price_now, running_low=None):
     """At the same day-index of each prior down leg, how far was price above
     the low that leg eventually made - and what that implies for this one.
 
@@ -73,13 +73,27 @@ def analogue(series, pivots, elapsed, price_now):
         return {"rows": [], "implied_low": None, "n": 0}
     highest = max(r["above_pct"] for r in rows)
     lowest = min(r["above_pct"] for r in rows)
+    lo = price_now / (1.0 + highest / 100.0)
+    hi = price_now / (1.0 + lowest / 100.0)
+
+    # An implied low ABOVE a low that has already printed is impossible - that
+    # level was already traded through. Clamp it, and report whether every
+    # analogue now sits above the running low, which is itself the finding:
+    # all of them would be consistent with the low already being in.
+    all_above = running_low is not None and lo >= running_low
+    if running_low is not None:
+        hi = min(hi, running_low)
+        lo = min(lo, running_low)
+
     return {
         "rows": rows,
         "n": len(rows),
-        # Invert: if price today stands the same distance above its eventual
-        # low as it did then, that low would be here.
-        "implied_low": (price_now / (1.0 + highest / 100.0),
-                        price_now / (1.0 + lowest / 100.0)),
+        # The sample shrinks past the shortest completed leg - a leg of 363
+        # days simply has no "day 370" - so the caller must be able to say WHY
+        # n moved rather than silently comparing against a different set.
+        "n_total": len(completed_down_legs(pivots)),
+        "implied_low": (lo, hi),
+        "all_analogues_above_running_low": all_above,
         "current_above_running_low": None,   # filled by caller, needs the low
     }
 
@@ -114,11 +128,16 @@ def divergence(series, pivots, new_lows, today):
     }
 
 
-def must_happen(band_lo, band_hi, running_low, remaining):
-    """The single crisp falsifiable sentence, stated before the event."""
+def must_happen(band_lo, band_hi, running_low, remaining, ended=False):
+    """The single crisp falsifiable sentence - future tense while the window is
+    open, past tense once it has closed. Saying what "must happen" inside a
+    window that shut days ago is how a tracker starts lying quietly."""
+    price = "$" + format(int(round(running_low["price"])), ",")
+    if ended:
+        return ("no leg low printed below **%s** between `%s` and `%s` — "
+                "the window closed" % (price, band_lo.isoformat(), band_hi.isoformat()))
     return ("a new leg low must print below **%s** between `%s` and `%s`"
-            % ("$" + format(int(round(running_low["price"])), ","),
-               band_lo.isoformat(), band_hi.isoformat()))
+            % (price, band_lo.isoformat(), band_hi.isoformat()))
 
 
 def invalidations(last_ath, price_now, running_low, band_hi, today, new_lows):

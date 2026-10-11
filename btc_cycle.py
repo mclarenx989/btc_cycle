@@ -330,15 +330,59 @@ def build_state(conn, series, ps, today):
     scored = conn.execute("SELECT COUNT(*) c FROM scores").fetchone()["c"]
     hits = conn.execute("SELECT COUNT(*) c FROM scores WHERE within_tolerance=1").fetchone()["c"]
 
-    # Only compare schedules on the SAME upcoming pivot. Widening this to
-    # "the next N projections of this kind" pulls in the pivot after next,
-    # which is a whole cycle away and always reads as a disagreement.
+    prov = pv.provisional_atl(series, ps[-1]["date"], today) if ps else None
+    new_lows = pv.new_lows_since(series, ps[-1]["date"]) if ps else []
+    band_lo = leg["target_date"] - timedelta(days=sch.TOLERANCE_DAYS)
+    band_hi = leg["target_date"] + timedelta(days=sch.TOLERANCE_DAYS)
+
+    ana = ant.analogue(series, ps, leg["elapsed"], price,
+                       running_low=prov["price"] if prov else None)
+    if low is not None:
+        ana["current_above_running_low"] = (price / low["low"] - 1.0) * 100.0
+    div = ant.divergence(series, ps, new_lows, today)
+    must = ant.must_happen(band_lo, band_hi, prov, leg["remaining"],
+                           ended=leg["ended"]) if prov else ""
+    inval = ant.invalidations(leg["from"], price, prov, band_hi, today, new_lows)
+
+    # Once the leg has ended, the next pivot is no longer of `to_kind` - the
+    # old code kept hunting for the next ATL and surfaced one four years out,
+    # skipping the 2029 ATH entirely. Take the earliest upcoming projection of
+    # ANY kind instead.
+    kind_filter = "" if leg["ended"] else " AND kind = ?"
+    params = [today.isoformat()] if leg["ended"] else [today.isoformat(), leg["to_kind"]]
     upcoming = conn.execute(
-        "SELECT schedule, projected_date FROM projections WHERE kind=? AND projected_date>=? "
-        "ORDER BY projected_date", (leg["to_kind"], today.isoformat())).fetchall()
+        "SELECT schedule, kind, projected_date, basis FROM projections "
+        "WHERE projected_date >= ?" + kind_filter +
+        " ORDER BY projected_date", params).fetchall()
+
+    next_proj = None
     if upcoming:
-        first = date.fromisoformat(upcoming[0]["projected_date"])
-        near = [r for r in upcoming
+        # The ledger is write-once, so a schedule that re-anchors leaves its
+        # older projection in place. Both stay registered and both get graded,
+        # but the display should show each schedule's CURRENT call - otherwise
+        # `derived` appears twice with two different dates.
+        # Per schedule: keep only its most recent BASIS (a re-anchor creates a
+        # fresh batch), then within that batch take the SOONEST upcoming date.
+        # Taking the last row created instead picks the furthest-out step of
+        # the chain - which surfaced 2033 dates as "next pivot".
+        cand = {}
+        for r in conn.execute(
+                "SELECT schedule, kind, projected_date, basis, created_at "
+                "FROM projections WHERE projected_date >= ?", [today.isoformat()]):
+            if not (leg["ended"] or r["kind"] == leg["to_kind"]):
+                continue
+            cur = cand.get(r["schedule"])
+            if (cur is None
+                    or r["created_at"] > cur["created_at"]
+                    or (r["created_at"] == cur["created_at"]
+                        and r["projected_date"] < cur["projected_date"])):
+                cand[r["schedule"]] = r
+        rows = sorted(cand.values(), key=lambda r: r["projected_date"])
+        if not rows:
+            rows = [upcoming[0]]
+
+        first = date.fromisoformat(rows[0]["projected_date"])
+        near = [r for r in rows
                 if (date.fromisoformat(r["projected_date"]) - first).days <= 180]
         dates = sorted({r["projected_date"] for r in near})
         names = sorted({r["schedule"] for r in near})
@@ -346,24 +390,30 @@ def build_state(conn, series, ps, today):
             agreement = "✅  %s\nagree on `%s`" % (" + ".join(names), dates[0])
         else:
             agreement = "⚡  split\n" + "\n".join(
-                "`%s`  %s" % (r["projected_date"], r["schedule"]) for r in near)
+                "`%s`  %s%s" % (r["projected_date"], r["schedule"],
+                                "  \u26a0\ufe0f" if (leg["ended"]
+                                                  and r["schedule"] == "oracle")
+                                else "")
+                for r in near)
+            if leg["ended"] and any(r["schedule"] == "oracle" for r in near):
+                agreement += ("\n\u26a0\ufe0f *oracle chains through the %s "
+                              "that never printed*" % leg["to_kind"].upper())
+
+        # Only the chain that actually runs through the pivot that never
+        # printed gets the warning. `derived` re-anchored onto the realized
+        # low, so flagging it here would be exactly the kind of misattributed
+        # claim this project exists to avoid.
+        lead = rows[0]
+        next_proj = {"date": first, "kind": lead["kind"], "schedules": names,
+                     "schedule": lead["schedule"],
+                     "chains_unrealized": leg["ended"]
+                                          and lead["schedule"] == "oracle"}
     else:
         agreement = "n/a"
 
-    prov = pv.provisional_atl(series, ps[-1]["date"], today) if ps else None
-    new_lows = pv.new_lows_since(series, ps[-1]["date"]) if ps else []
-
-    band_lo = leg["target_date"] - timedelta(days=sch.TOLERANCE_DAYS)
-    band_hi = leg["target_date"] + timedelta(days=sch.TOLERANCE_DAYS)
-    ana = ant.analogue(series, ps, leg["elapsed"], price)
-    if low is not None:
-        ana["current_above_running_low"] = (price / low["low"] - 1.0) * 100.0
-    div = ant.divergence(series, ps, new_lows, today)
-    must = ant.must_happen(band_lo, band_hi, prov, leg["remaining"]) if prov else ""
-    inval = ant.invalidations(leg["from"], price, prov, band_hi, today, new_lows)
-
     return {"leg": leg, "price": price, "pivots": ps, "running_low": low,
             "band": (band_lo, band_hi), "analogue": ana, "must_happen": must,
+            "next_proj": next_proj,
             "divergence": div, "invalidations": inval,
             "scored": scored, "hits": hits, "agreement": agreement, "today": today,
             "provisional": prov, "new_low_count": len(new_lows),
@@ -531,7 +581,8 @@ def daily(conn, dry_run):
     found = pv.detect(series)
     fresh = save_pivots(conn, found)
     ps = load_pivots(conn)
-    save_projections(conn, sch.all_projections(ps))
+    prov_now = pv.provisional_atl(series, ps[-1]['date'], today) if ps else None
+    save_projections(conn, sch.all_projections(ps, provisional_low=prov_now))
 
     embeds = []
     if gap_days > 0:
